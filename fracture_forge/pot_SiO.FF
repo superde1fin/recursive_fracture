@@ -1,0 +1,10 @@
+mass    1 28.086  #Si
+mass    2 15.9994 #O
+
+pair_style      hybrid/overlay table linear 20000 sw
+pair_coeff      * * sw ../potentials/MahadevanDu/sw_sionah.UNT Si O
+
+pair_coeff      1 1 table ../potentials/MahadevanDu/MGSiOHNa.UNT SiSi 10
+pair_coeff      1 2 table ../potentials/MahadevanDu/MGSiOHNa.UNT OSi 10
+
+pair_coeff      2 2 table ../potentials/MahadevanDu/MGSiOHNa.UNT OO 10

@@ -14,7 +14,7 @@ Reading data file ...
   4500 atoms
   reading velocities ...
   4500 velocities
-  read_data CPU = 0.035 seconds
+  read_data CPU = 0.036 seconds
 timestep 1
 include pot_SiO.FF
 mass    1 28.086  #Si
@@ -46,11 +46,13 @@ dump stress_dump all custom 100000 ./dumps/dump_SiO.*.dump id type x y z c_stres
 print "$(lx)"
 39.752392474721325755
 info system
+info system
 print "$(lx)"
 39.752392474721325755
 print "$(ly)"
 39.752392474721325755
 print "$(lz)"
 39.752392474721325755
-timestep 1
-Total wall time: 0:00:00
+print "$(pe)"
+ERROR: Energy was not tallied on needed timestep (src/thermo.cpp:1152)
+Last command: $(pe

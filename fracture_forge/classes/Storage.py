@@ -7,4 +7,6 @@ class Data:
     initial_types = 2
 
 class SystemParams:
-    parameters = {}
+    parameters = {
+            "simulation_temp" : 300
+            }

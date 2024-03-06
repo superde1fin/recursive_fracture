@@ -9,7 +9,7 @@ import regex as re
 def near_surface(coords, atom_pos, theta, dr, a):
     x0, y0 = coords #Tip of the division vector
 
-    #Tail of th division vector
+    #Tail of the division vector
     x1 = x0 - dr*np.cos(theta)
     y1 = y0 - dr*np.sin(theta)
 
@@ -37,16 +37,16 @@ def near_surface(coords, atom_pos, theta, dr, a):
     f31 = np.poly1d([np.tan(theta), y3 - x3*np.tan(theta)])
 
     if theta <= np.pi/2:
-        if (atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] <= np.polyval(f21, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] >= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] >= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
+        if (atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] <= np.polyval(f21, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] >= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
             return 1
-        elif (atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] >= np.polyval(f31, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] >= np.polyval(f02, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
+        elif (atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] >= np.polyval(f31, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
             return -1
         else:
             return 0
     else:
-        if (atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f21, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] <= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] >= np.polyval(f02, atom_pos[0]) and atom_pos[1] <= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
+        if (atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f21, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] <= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
             return 1
-        elif (atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] <= np.polyval(f31, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] >= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
+        elif (atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] <= np.polyval(f31, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
             return -1
         else:
             return 0
@@ -135,6 +135,16 @@ def vizualization(lmp, thermo_step = 0.1, dump_step = 0.1): #ns
     lmp.compute("stress_pa all stress/atom NULL")
     lmp.compute("pe_pa all pe/atom")
 
+def create_surface(lmp):
+    SystemParams.parameters["old_bounds"] = (lmp.system.ylo, lmp.system.yhi)
+    print(SystemParams.parameters["old_bounds"])
+    lmp.change_box(f"all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
+    """
+    lmp.fix(f"surface_relax all npt temp {SystemParam.parameters['simulation_temp']} {SystemParam.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
+    lmp.run(convert_timestep(lmp, 0.1))
+    lmp.unfix("surface_relax")
+    """
+
 
 
 def copy_lmp(lmp, potfile, theta, dr, coords):
@@ -169,12 +179,15 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
         new_lmp.create_atoms(new_type, "single", position)
 
     new_lmp.run(0)
-    new_lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
+#    new_lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
+    new_lmp.write_data("output.structure")
     return new_lmp
 
 
 def quazi_static(lmp, dr_frac = 0.01, dtheta = 1):
     print("start")
+    dr = dr_frac*max(lmp.eval("lx"), lmp.eval("ly"), lmp.eval("lz"))
+    create_surface(lmp)
     filename = glob.glob("glass_*.structure")[-1]
     name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
     potfile = os.path.abspath(f"pot_{name_handle}.FF")
@@ -189,14 +202,14 @@ def quazi_static(lmp, dr_frac = 0.01, dtheta = 1):
         os.system(f"rm -r {starting_dir}/*")
     os.chdir(starting_dir)
 
-    new_lmp = QSR(lmp = lmp, coords = start_coords, dr = dr_frac*max(lmp.eval("lx"), lmp.eval("ly"), lmp.eval("lz")), dtheta = dtheta, theta = None, potfile = potfile)
+    new_lmp = QSR(lmp = lmp, coords = start_coords, dr = dr, dtheta = dtheta, theta = None, potfile = potfile, in_glass = False)
 
     new_lmp.write_data("output.structure")
 
     return (abs(lmp.eval("pe")) - abs(new_lmp.eval("pe")))/new_lmp.variables["surface_area"].value
 
 
-def QSR(lmp, coords, dr, dtheta, theta, potfile):
+def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
     os.system(f"echo '{coords}' >> path.txt")
 #    input("Hold")
 
@@ -204,37 +217,41 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile):
     print("Coordinates: ", coords)
     os.system("pwd")
 
-    out_of_bouds = False
+    if not in_glass and coords[1] >= SystemParams.parameters["old_bounds"][0]:
+        in_glass = True
+        lmp.variable(f"surface_area equal 0")
 
-    if not theta is None:
+    if in_glass:
         lmp = copy_lmp(lmp, potfile, theta, dr, coords)
+        #Debug
+#       return lmp
         if coords[0] > lmp.system.xhi:
             dist = dr - (coords[0] - lmp.system.xhi)/np.cos(theta)
         elif coords[0] < lmp.system.xlo:
             dist = dr - (lmp.system.xhi - coords[0])/np.sin(np.pi - theta)
-        elif coords[1] > lmp.system.yhi:
-            dist = dr - (coords[1] - lmp.system.yhi)/np.sin(theta)
+        elif coords[1] > SystemParams.parameters["old_bounds"][1]:
+            dist = dr - (coords[1] - SystemParams.parameters["old_bounds"][1])/np.sin(theta)
+        elif coords[1] - dr*np.sin(theta) < SystemParams.parameters["old_bounds"][0]:
+            dist = (coords[1] - SystemParams.parameters["old_bounds"][0])/np.sin(theta)
         else:
             dist = dr
 
         lmp.variable(f"surface_area equal {lmp.variables['surface_area'].value + dist*lmp.eval('lz')}")
-    else:
-        lmp.variable(f"surface_area equal {dr*lmp.eval('lz')}")
 
-    if coords[0] >= lmp.system.xhi or coords[0] <= lmp.system.xlo or coords[1] >= lmp.system.yhi:
-        return lmp
+        if coords[0] >= lmp.system.xhi or coords[0] <= lmp.system.xlo or coords[1] >= lmp.system.yhi:
+            return lmp
 
 
     lowest_pot = float("infinity")
     res_lmp = None
     prev_theta = theta
     for theta in np.linspace(dtheta*(np.pi/180), np.pi - dtheta*(np.pi/180), int(180/dtheta) - 1):
-#    for theta in [0]:
+#    for theta in [np.pi/2]:
         if prev_theta is None or theta - prev_theta != np.pi and theta - prev_theta != -np.pi:
             print("Theta: ", str(theta))
             os.system(f"mkdir {theta}")
             os.chdir(f"{theta}")
-            tmp_lmp =  QSR(lmp, coords = (coords[0] + dr*np.cos(theta), coords[1] + dr*np.sin(theta)), dr = dr, dtheta = dtheta, theta = theta, potfile = potfile)
+            tmp_lmp =  QSR(lmp, coords = (coords[0] + dr*np.cos(theta), coords[1] + dr*np.sin(theta)), dr = dr, dtheta = dtheta, theta = theta, potfile = potfile, in_glass = in_glass)
             os.chdir("..")
             new_pe = abs(tmp_lmp.eval("pe"))
 #            new_pe = tmp_lmp.eval("pe")
@@ -275,10 +292,9 @@ def main():
 
     vizualization(lmp)
 
-    simulation_temp = 300 #K
     #Minimization
     lmp.reset_atoms("id")
-    lmp.velocity(f"all create {simulation_temp} 12345 dist gaussian")
+    lmp.velocity(f"all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
     lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
 
 
@@ -286,7 +302,7 @@ def main():
     """
     #Run
     initial_relax = convert_timestep(lmp, 0.1)
-    lmp.fix(f"initial_relax all npt temp {simulation_temp} {simulation_temp} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
+    lmp.fix(f"initial_relax all npt temp {SystemParam.parameters['simulation_temp']} {SystemParam.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
     lmp.run(initial_relax)
     lmp.unfix("initial_relax")
     """

@@ -1,0 +1,46 @@
+mass    1 28.086  #Si
+mass    3 28.086  #Si
+mass    5 28.086  #Si
+
+
+mass    2 15.9994 #O
+mass    4 15.9994 #O
+mass    6 15.9994 #O
+
+
+
+variable        sw_path string "${home_dir}/../potentials/MahadevanDu/sw_sionah.UNT"
+variable        table_path string "${home_dir}/../potentials/MahadevanDu/MGSiOHNa.UNT"
+
+pair_style      hybrid/overlay table linear 20000 sw
+pair_coeff      * * sw ${sw_path} Si O Si O Si O
+
+pair_coeff      1 1 table ${table_path} SiSi 10
+pair_coeff      1 2 table ${table_path} OSi 10
+
+pair_coeff      2 2 table ${table_path} OO 10
+
+
+#-------------------------
+
+
+pair_coeff      3 3 table ${table_path} SiSi 10
+pair_coeff      5 5 table ${table_path} SiSi 10
+pair_coeff      3 2 table ${table_path} OSi 10
+pair_coeff      5 2 table ${table_path} OSi 10
+pair_coeff      3 4 table ${table_path} OSi 10
+pair_coeff      5 6 table ${table_path} OSi 10
+pair_coeff      1 3 table ${table_path} SiSi 10
+pair_coeff      1 5 table ${table_path} SiSi 10
+pair_coeff      1 4 table ${table_path} OSi 10
+pair_coeff      1 6 table ${table_path} OSi 10
+pair_coeff      4 4 table ${table_path} OO 10
+pair_coeff      6 6 table ${table_path} OO 10
+pair_coeff      2 4 table ${table_path} OO 10
+pair_coeff      2 6 table ${table_path} OO 10
+
+
+pair_coeff 3 5 table ${table_path} NoNo 10
+pair_coeff 3 6 table ${table_path} NoNo 10
+pair_coeff 4 5 table ${table_path} NoNo 10
+pair_coeff 4 6 table ${table_path} NoNo 10

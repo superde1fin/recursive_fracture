@@ -292,10 +292,12 @@ def main():
 
     vizualization(lmp)
 
+    """
     #Minimization
     lmp.reset_atoms("id")
     lmp.velocity(f"all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
     lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
+    """
 
 
 

@@ -40,66 +40,70 @@ def near_surface(coords, atom_pos, theta, dr, a):
 
     if theta <= np.pi/2:
         if (atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] <= np.polyval(f21, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] >= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
-            return 1
+            return 2
         elif (atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] >= np.polyval(f31, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
-            return -1
+            return 3
+        elif ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] >= np.polyval(f02, atom_pos[0])):
+            return 4
+        elif ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] >= np.polyval(f02, atom_pos[0])):
+            return 5
         else:
-            return 0
+            return 1
     else:
         if (atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f21, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] <= np.polyval(f01, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
-            return 1
+            return 2
         elif (atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f02, atom_pos[0]) and atom_pos[1] >= np.polyval(f12, atom_pos[0]) and atom_pos[1] <= np.polyval(f31, atom_pos[0])) or ((np.sqrt((atom_pos[0] - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] <= np.polyval(f12, atom_pos[0])):
-            return -1
+            return 3
+        elif ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] <= np.polyval(f01, atom_pos[0]) and atom_pos[1] >= np.polyval(f02, atom_pos[0])):
+            return 4
+        elif ((np.sqrt((atom_pos[0] - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] >= np.polyval(f01, atom_pos[0]) and atom_pos[1] >= np.polyval(f02, atom_pos[0])):
+            return 5
         else:
-            return 0
+            return 1
 
 
-def modify_potfile(lmp, potfile):
+def modify_potfile(lmp, potfile, interactions = "default", groups = 2):
     ntypes = lmp.system.ntypes
+    if interactions == "default":
+        interactions = []
+        for g in range(2, groups + 1):
+            interactions.append((1, g))
+            interactions.append((g, 1))
+    else:
+        for i in range(len(interactions)):
+            interactions.append(interactions[i][::-1])
+        
     text = open(potfile, 'r').read()
     name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", potfile)
     new_potfile = open(name, 'w')
     new_text = text + "\n\n#-------------------------\n\n"
     for t in range(1, ntypes + 1):
-        mass_re = re.compile(f"^mass\s+{t}\s+.+$", re.MULTILINE)
-        mass_line = mass_re.findall(text)[-1]
-        new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){t}(?=\s+.+$)", str(ntypes + t), mass_line) + '\n', new_text)
-        mass_re = re.compile(f"^mass\s+{ntypes + t}\s+.+$", re.MULTILINE)
-        mass_line = mass_re.findall(new_text)[-1]
-        new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes + t}(?=\s+.+$)", str(2*ntypes + t), mass_line) + '\n', new_text)
-
-        
-        coeff_lines = re.compile(f"(?:^pair_coeff\s+(?:(?:{t}\s+[0-9]+)|(?:[0-9]\s+{t}))\s+.+$)", re.MULTILINE).findall(text) 
-        for line in coeff_lines:
-            new_text += '\n' + re.sub(f"((?<=^pair_coeff\s+){t}(?=\s+[0-9]+.+$))|((?<=^pair_coeff\s+[0-9]\s+){t}(?=\s+.+$))", str(ntypes + t), line)
-            new_text += '\n' + re.sub(f"((?<=^pair_coeff\s+){t}(?=\s+[0-9]+.+$))|((?<=^pair_coeff\s+[0-9]\s+){t}(?=\s+.+$))", str(2*ntypes + t), line)
-
-        for j in range(t + 1, ntypes + 1):
-            line = re.compile(f"^pair_coeff\s+{ntypes + t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
-            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes + t}\s+){j}(?=\s+.+$)", str(ntypes + j), line)
-            line = re.compile(f"^pair_coeff\s+{2*ntypes + t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
-            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{2*ntypes + t}\s+){j}(?=\s+.+$)", str(2*ntypes + j), line)
+        for g in range(groups - 1):
+            mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
+            mass_line = mass_re.findall(new_text)[-1]
+            new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
 
 
-        self_coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{t}\s+.+$", re.MULTILINE).findall(text)[-1]
-        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{t}\s+){t}(?=\s+.+$)", str(ntypes + t), self_coeff_line)
-        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{t}\s+){t}(?=\s+.+$)", str(2*ntypes + t), self_coeff_line)
+            for j in range(t, ntypes + 1):
+                coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
+                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
 
 
-    general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
-    type_names = general_type_re.search(new_text).group()*3
-    new_text = general_type_re.sub(type_names, new_text)
-
-    new_text += '\n\n'
-
-    for i in range(1, ntypes + 1):
-        for j in range(1, ntypes + 1):
-            new_text += f"\npair_coeff {ntypes + i} {2*ntypes + j} table ${{table_path}} NoNo 10"
+                for group_iter in range(g + 2, groups + 1):
+                    if (g + 1, group_iter) in interactions:
+                        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                        if t != j:
+                            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                    else:
+                        tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
+                        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                        if t != j:
+                            tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
+                            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
             
-
-    
-
-
+    general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
+    type_names = general_type_re.search(new_text).group()*groups
+    new_text = general_type_re.sub(type_names, new_text)
     new_potfile.write(new_text)
 
     return name
@@ -124,6 +128,7 @@ def system_parameters_initialization(lmp, units = "metal"):
 def convert_timestep(lmp, step): #ns  - step
     return int((step*1e-9)/(lmp.eval("dt")*Data.units_data[SystemParams.parameters["units"]]["timestep"]))
 
+
 @Lmpfunc
 def vizualization(lmp, thermo_step = 0.1, dump_step = 0.1): #ns
     thermo_step = convert_timestep(lmp, thermo_step)
@@ -137,14 +142,17 @@ def vizualization(lmp, thermo_step = 0.1, dump_step = 0.1): #ns
     lmp.compute("stress_pa all stress/atom NULL")
     lmp.compute("pe_pa all pe/atom")
 
+
 def create_surface(lmp):
     SystemParams.parameters["old_bounds"] = (lmp.system.ylo, lmp.system.yhi)
     Helper.print("Old bounds:", SystemParams.parameters["old_bounds"])
     lmp.change_box(f"all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
+    #Testing
+    """
     lmp.fix(f"surface_relax all npt temp {SystemParams.parameters['simulation_temp']} {SystemParams.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
     lmp.run(convert_timestep(lmp, 0.1))
     lmp.unfix("surface_relax")
-
+    """
 
 
 @Lmpfunc
@@ -158,30 +166,31 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
     new_lmp.timestep(1)
 
     new_lmp.region("my_simbox block", lmp.system.xlo, lmp.system.xhi, lmp.system.ylo, lmp.system.yhi, lmp.system.zlo, lmp.system.zhi)
-    new_lmp.create_box(Data.initial_types*3, "my_simbox")
+    new_lmp.create_box(Data.initial_types*Data.type_groups, "my_simbox")
     vizualization(new_lmp)
     new_lmp.include(potfile)
     my_atoms = np.array(lmp.lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
     types = np.array(lmp.lmp.gather_atoms("type", 0, 1), dtype = ct.c_double)
     for i in range(len(lmp.atoms)):
         float_pos = my_atoms[i]
-        if types[i] > Data.initial_types:
+        if types[i] <= Data.initial_types:
+            group = near_surface(coords, float_pos[:-1], theta, dr, Data.non_inter_cutoff)
+            new_type = int(types[i]) + (group - 1)*Data.initial_types
+        elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
             new_type = int(types[i])
         else:
-            surface_pos = near_surface(coords, float_pos[:-1], theta, dr, Data.non_inter_cutoff)
-            if surface_pos == -1:
-                new_type = int(types[i]) + Data.initial_types
-            elif surface_pos == 1:
-                new_type = int(types[i]) + 2*Data.initial_types
-            else:
-                new_type = int(types[i])
+            group = near_surface(coords, float_pos[:-1], theta, dr, Data.non_inter_cutoff)
+            tp = int(types[i])%Data.initial_types
+            tp = tp if tp else tp + Data.initial_types
+            new_type = tp + (group - 1)*Data.initial_types
 
         position = " ".join(map(str, float_pos))
         new_lmp.create_atoms(new_type, "single", position)
 
     MPI.COMM_WORLD.Barrier()
-#    new_lmp.run(0)
-    new_lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
+    #Testing
+    new_lmp.run(0)
+#    new_lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr += 1
     return new_lmp
@@ -195,7 +204,7 @@ def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
     filename = glob.glob("glass_*.structure")[-1]
     name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
     potfile = os.path.abspath(f"pot_{name_handle}.FF")
-    potfile = modify_potfile(lmp, potfile)
+    potfile = modify_potfile(lmp, potfile, interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)], groups = Data.type_groups)
     start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, lmp.system.ylo*1.01)
     Data.initial_types = lmp.system.ntypes
 
@@ -228,7 +237,7 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
 
     #Output
     Helper.print("Coordinates: ", coords)
-    Helper.print(f"In {os.getcwd().split(os.path.commonprefix([potfile, os.getcwd()]))[-1]}")
+    #Helper.print(f"In {os.getcwd().split(os.path.commonprefix([potfile, os.getcwd()]))[-1]}")
 
     if not in_glass and coords[1] >= SystemParams.parameters["old_bounds"][0]:
         in_glass = True
@@ -305,17 +314,16 @@ def main():
     vizualization(lmp)
 
     #Minimization
-    #lmp.run(0)
+    #Testing
+    lmp.run(0)
     lmp.velocity(f"all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
-    lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
+    #lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
 
-
-    Helper.print("\n\nG:", quazi_static(lmp))
-#    Helper.print("\n\nG:", quazi_static(lmp, 0.5, 60))
+    #Testing
+#    Helper.print("\n\nG:", quazi_static(lmp))
+    Helper.print("\n\nG:", quazi_static(lmp, 0.5, 60))
 
     return lmp
 
 if __name__ == "__main__":
     main().lmp.finalize()
-#    MPI.COMM_WORLD.Barrier()
-#    MPI.Finalize()

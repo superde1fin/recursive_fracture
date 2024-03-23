@@ -8,6 +8,7 @@ class Data:
                 }
     non_inter_cutoff = 10
     initial_types = 2
+    type_groups = 5
 
 class SystemParams:
     parameters = {

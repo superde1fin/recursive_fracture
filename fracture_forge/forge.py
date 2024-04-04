@@ -239,7 +239,7 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
         if coords[0] > lmp.system.xhi:
             dist = dr - (coords[0] - lmp.system.xhi)/np.cos(theta)
         elif coords[0] < lmp.system.xlo:
-            dist = dr - (lmp.system.xhi - coords[0])/np.sin(np.pi - theta)
+            dist = dr - (lmp.system.xlo - coords[0])/np.sin(np.pi - theta)
         elif coords[1] > SystemParams.parameters["old_bounds"][1]:
             dist = dr - (coords[1] - SystemParams.parameters["old_bounds"][1])/np.sin(theta)
         elif coords[1] - dr*np.sin(theta) < SystemParams.parameters["old_bounds"][0]:

@@ -188,10 +188,8 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
 #    new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr += 1
     new_lmp.velocity(f"all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
-    """
     new_lmp.region(f"top_corner cylinder z $(xlo) {SystemParams.parameters['old_bounds'][0]} 10 $(zlo) $(zhi)")
     new_lmp.region(f"bottom_corner cylinder z $(xhi) {SystemParams.parameters['old_bounds'][0]} 10 $(zlo) $(zhi)")
-    """
     new_lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr += 1
@@ -261,8 +259,8 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
 
         lmp.variable(f"surface_area equal {lmp.variables['surface_area'].value + dist*lmp.eval('lz')}")
 
-        if coords[0] >= lmp.system.xhi or coords[0] <= lmp.system.xlo or coords[1] >= SystemParams.parameters["old_bounds"][1]:
-            return lmp
+    if coords[0] >= lmp.system.xhi or coords[0] <= lmp.system.xlo or coords[1] >= SystemParams.parameters["old_bounds"][1]:
+        return lmp
 
 
     lowest_pot = float("infinity")

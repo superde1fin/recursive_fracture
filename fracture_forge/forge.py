@@ -145,10 +145,10 @@ def vizualization(lmp, thermo_step = 0.1, dump_step = 0.1): #ns
 def create_surface(lmp):
     SystemParams.parameters["old_bounds"] = (lmp.system.ylo, lmp.system.yhi)
     Helper.print("Old bounds:", SystemParams.parameters["old_bounds"])
-    lmp.change_box(f"all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
-    lmp.fix(f"surface_relax all npt temp {SystemParams.parameters['simulation_temp']} {SystemParams.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
-    lmp.run(convert_timestep(lmp, 0.1))
-    lmp.unfix("surface_relax")
+    #lmp.change_box(f"all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
+    #lmp.fix(f"surface_relax all npt temp {SystemParams.parameters['simulation_temp']} {SystemParams.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
+    #lmp.run(convert_timestep(lmp, 0.1))
+    #lmp.unfix("surface_relax")
 
 
 @Lmpfunc
@@ -165,9 +165,16 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
     new_lmp.create_box(Data.initial_types*Data.type_groups, "my_simbox")
     vizualization(new_lmp)
     new_lmp.include(potfile)
+
+    time1 = time.time()
     my_atoms = np.array(lmp.lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
     types = np.array(lmp.lmp.gather_atoms("type", 0, 1), dtype = ct.c_double)
     box_side = lmp.eval('lx')
+
+    MPI.COMM_WORLD.Barrier()
+    Helper.print("Gather time:", time.time() - time1)
+    time2 = time.time()
+
     for i in range(len(lmp.atoms)):
         float_pos = my_atoms[i]
         if types[i] <= Data.initial_types:
@@ -185,12 +192,8 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
         new_lmp.create_atoms(new_type, "single", position)
 
     MPI.COMM_WORLD.Barrier()
-#    new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
-    Helper.output_ctr += 1
-    new_lmp.velocity(f"all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
-    new_lmp.region(f"top_corner cylinder z $(xlo) {SystemParams.parameters['old_bounds'][0]} 10 $(zlo) $(zhi)")
-    new_lmp.region(f"bottom_corner cylinder z $(xhi) {SystemParams.parameters['old_bounds'][0]} 10 $(zlo) $(zhi)")
-    new_lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
+    Helper.print("Time to copy:", time.time() - time2)
+    new_lmp.run('0')
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr += 1
     return new_lmp
@@ -205,7 +208,7 @@ def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
     name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
     potfile = os.path.abspath(f"pot_{name_handle}.FF")
     potfile = modify_potfile(lmp, potfile, interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)], groups = Data.type_groups)
-    start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, lmp.system.ylo*1.01)
+    start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, lmp.system.ylo - 0.1)
 #    start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, lmp.system.ylo + lmp.eval("ly")/2)
     Data.initial_types = lmp.system.ntypes
 
@@ -221,7 +224,7 @@ def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr = 0
     
-    result = (abs(lmp.eval("pe")) - abs(new_lmp.eval("pe")))/new_lmp.variables["surface_area"].value
+    result = 0.69*(abs(lmp.eval("pe")) - abs(new_lmp.eval("pe")))/new_lmp.variables["surface_area"].value
 
     new_lmp.close()
     Helper.mkdir("../QS_results")
@@ -274,7 +277,7 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
             tmp_lmp =  QSR(lmp, coords = (coords[0] + dr*np.cos(theta), coords[1] + dr*np.sin(theta)), dr = dr, dtheta = dtheta, theta = theta, potfile = potfile, in_glass = in_glass)
             Helper.chdir("..")
             Helper.command(f"mv {theta}/output.*.structure .")
-            Helper.command(f"mv {theta}/positions.*.dump .")
+            #Helper.command(f"mv {theta}/positions.*.dump .")
             new_pe = abs(tmp_lmp.eval("pe"))
             Helper.print(f"lowest pe: {new_pe}")
             if new_pe < lowest_pot:
@@ -322,7 +325,7 @@ def main():
 
     #Testing
 #    Helper.print("\n\nG:", quazi_static(lmp))
-    Helper.print("\n\nG:", quazi_static(lmp, 0.5, 60))
+    Helper.print("\n\nG:", quazi_static(lmp, 0.25, 60))
 
     return lmp
 

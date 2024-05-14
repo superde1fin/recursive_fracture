@@ -153,6 +153,10 @@ def create_surface(lmp):
 
 @Lmpfunc
 def copy_lmp(lmp, potfile, theta, dr, coords):
+    comm = MPI.COMM_WORLD
+    size = comm.Get_size()
+    rank = comm.Get_rank()
+
     Helper.print("starting copy")
     new_lmp = PyLammps(verbose = False)
 
@@ -171,11 +175,18 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
     types = np.array(lmp.lmp.gather_atoms("type", 0, 1), dtype = ct.c_double)
     box_side = lmp.eval('lx')
 
-    MPI.COMM_WORLD.Barrier()
+    comm.Barrier()
     Helper.print("Gather time:", time.time() - time1)
     time2 = time.time()
 
-    for i in range(len(lmp.atoms)):
+    numatoms = len(lmp.atoms)
+    proc_atoms = int(numatoms/size)
+    new_atoms = []
+    if rank == size - 1:
+      upper_bound = numatoms
+    else:
+      upper_bound = proc_atoms*(rank + 1)
+    for i in range(rank*proc_atoms, upper_bound):
         float_pos = my_atoms[i]
         if types[i] <= Data.initial_types:
             group = near_surface(coords, float_pos[:-1], theta, dr, Data.non_inter_cutoff, box_side)
@@ -189,10 +200,17 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
             new_type = tp + (group - 1)*Data.initial_types
 
         position = " ".join(map(str, float_pos))
+        new_atoms.append((new_type, position))
+
+    comm.Barrier()
+    full_atoms = []
+    for i in range(size):
+        full_atoms += comm.bcast(new_atoms, root = i)
+    for new_type, position in full_atoms:
         new_lmp.create_atoms(new_type, "single", position)
 
-    MPI.COMM_WORLD.Barrier()
     Helper.print("Time to copy:", time.time() - time2)
+
     new_lmp.run('0')
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr += 1

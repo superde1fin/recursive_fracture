@@ -8,7 +8,8 @@ import time, random
 import regex as re
 
 
-def near_surface(coords, atom_pos, theta, dr, a, side):
+def near_surface(coords, atom_pos, angles, dr, a, side):
+    prev_theta, theta = angles
     x0, y0 = coords #Tip of the division vector
 
     #Tail of the division vector
@@ -38,20 +39,30 @@ def near_surface(coords, atom_pos, theta, dr, a, side):
     #Line through point (x3, y3) at angle theta
     f31 = np.poly1d([np.tan(theta), y3 - x3*np.tan(theta)])
 
+    #Line through point (x1, y1) at angle perpendicular to prev_theta
+    f99 = np.poly1d([np.tan(prev_theta + np.pi/2), y1 - x1*np.tan(prev_theta + np.pi/2)])
+
     for x in [atom_pos[0], side + atom_pos[0], atom_pos[0] - side]:
-        if theta <= np.pi/2:
-            if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f01, x)) or ((np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f12, x)):
+	#Tail of the cut coverage at turns
+        if (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < a) and (atom_pos[1] < np.polyval(f12, x)) and (atom_pos[1] > np.polyval(f99, x)):
+            if (prev_theta > theta):
                 return 2
-            elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)) or ((np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f12, x)):
+            elif (prev_theta < theta):
+                return 3
+
+        if theta <= np.pi/2:
+            if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f01, x)):
+                return 2
+            elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)):
                 return 3
             elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
                 return 4
             elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
                 return 5
         else:
-            if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f01, x)) or ((np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f12, x)):
+            if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f01, x)):
                 return 2
-            elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f31, x)) or ((np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) <= a) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f12, x)):
+            elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f31, x)):
                 return 3
             elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= a) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
                 return 4
@@ -143,7 +154,16 @@ def vizualization(lmp, thermo_step = 0.1, dump_step = 0.1): #ns
 
 
 def create_surface(lmp):
-    SystemParams.parameters["old_bounds"] = (lmp.system.ylo, lmp.system.yhi)
+    min_y = float("inf")
+    max_y = float("-inf")
+    my_atoms = np.array(lmp.lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
+    for atom in my_atoms:
+        if atom[1] < min_y:
+            min_y = atom[1]
+        if atom[1] > max_y:
+            max_y = atom[1]
+    SystemParams.parameters["old_bounds"] = (min_y, max_y)
+
     Helper.print("Old bounds:", SystemParams.parameters["old_bounds"])
     #lmp.change_box(f"all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
     #lmp.fix(f"surface_relax all npt temp {SystemParams.parameters['simulation_temp']} {SystemParams.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
@@ -152,7 +172,7 @@ def create_surface(lmp):
 
 
 @Lmpfunc
-def copy_lmp(lmp, potfile, theta, dr, coords):
+def copy_lmp(lmp, potfile, angles, dr, coords):
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     rank = comm.Get_rank()
@@ -189,12 +209,12 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
     for i in range(rank*proc_atoms, upper_bound):
         float_pos = my_atoms[i]
         if types[i] <= Data.initial_types:
-            group = near_surface(coords, float_pos[:-1], theta, dr, Data.non_inter_cutoff, box_side)
+            group = near_surface(coords, float_pos[:-1], angles, dr, Data.non_inter_cutoff, box_side)
             new_type = int(types[i]) + (group - 1)*Data.initial_types
         elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
             new_type = int(types[i])
         else:
-            group = near_surface(coords, float_pos[:-1], theta, dr, Data.non_inter_cutoff, box_side)
+            group = near_surface(coords, float_pos[:-1], angles, dr, Data.non_inter_cutoff, box_side)
             tp = int(types[i])%Data.initial_types
             tp = tp if tp else tp + Data.initial_types
             new_type = tp + (group - 1)*Data.initial_types
@@ -218,7 +238,7 @@ def copy_lmp(lmp, potfile, theta, dr, coords):
 
 
 @Lmpfunc
-def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
+def quazi_static(lmp, dr_frac = 0.1, dtheta = 10):
     Helper.print("start")
     dr = dr_frac*max(lmp.eval("lx"), lmp.eval("ly"), lmp.eval("lz"))
     create_surface(lmp)
@@ -226,7 +246,7 @@ def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
     name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
     potfile = os.path.abspath(f"pot_{name_handle}.FF")
     potfile = modify_potfile(lmp, potfile, interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)], groups = Data.type_groups)
-    start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, lmp.system.ylo - 0.1)
+    start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, SystemParams.parameters["old_bounds"][0] - 1)
 #    start_coords = (lmp.eval("lx")/2 + lmp.system.xlo, lmp.system.ylo + lmp.eval("ly")/2)
     Data.initial_types = lmp.system.ntypes
 
@@ -237,7 +257,14 @@ def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
         Helper.command(f"rm -r {starting_dir}/*")
     Helper.chdir(starting_dir)
 
-    new_lmp = QSR(lmp = lmp, coords = start_coords, dr = dr, dtheta = dtheta, theta = None, potfile = potfile, in_glass = False)
+    #Check so that surface regions don't overlap through a periodix x boundary
+    x_side = lmp.eval("lx")
+    if dtheta*(np.pi/180) < np.arcsin(2*Data.non_inter_cutoff/x_side):
+        angle_span = (2*dtheta*(np.pi/180), np.pi - 2*dtheta*(np.pi/180), int(180/dtheta) - 3)
+    else:
+        angle_span = (dtheta*(np.pi/180), np.pi - dtheta*(np.pi/180), int(180/dtheta) - 1)
+
+    new_lmp = QSR(lmp = lmp, coords = start_coords, dr = dr, span = angle_span, angles = (np.pi/2, None), potfile = potfile, in_glass = False)
 
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr = 0
@@ -254,8 +281,11 @@ def quazi_static(lmp, dr_frac = 0.05, dtheta = 10):
 
 
 @Lmpfunc
-def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
+def QSR(lmp, coords, dr, span, angles, potfile, in_glass):
+    prev_theta, theta = angles
+    prev_theta = np.pi/2 if not prev_theta else prev_theta
     Helper.command(f"echo '{coords}' >> path.txt")
+    Helper.print(f"Recursion step: {Helper.output_ctr}")
 
     #Output
     Helper.print("Coordinates: ", coords)
@@ -266,7 +296,7 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
         lmp.variable(f"surface_area equal 0")
 
     if in_glass:
-        lmp = copy_lmp(lmp, potfile, theta, dr, coords)
+        lmp = copy_lmp(lmp, potfile, (prev_theta, theta), dr, coords)
         if coords[0] > lmp.system.xhi:
             dist = dr - (coords[0] - lmp.system.xhi)/np.cos(theta)
         elif coords[0] < lmp.system.xlo:
@@ -287,12 +317,13 @@ def QSR(lmp, coords, dr, dtheta, theta, potfile, in_glass):
     lowest_pot = float("infinity")
     res_lmp = None
     prev_theta = theta
-    for theta in np.linspace(dtheta*(np.pi/180), np.pi - dtheta*(np.pi/180), int(180/dtheta) - 1):
-        if prev_theta is None or theta - prev_theta != np.pi and theta - prev_theta != -np.pi:
+
+    for theta in np.linspace(*span):
+        if prev_theta is None or np.pi - prev_theta + theta >= np.pi/2 and prev_theta + np.pi - theta     >= np.pi/2:
             Helper.print("Theta: ", str(theta))
             Helper.mkdir(f"{theta}")
             Helper.chdir(f"{theta}")
-            tmp_lmp =  QSR(lmp, coords = (coords[0] + dr*np.cos(theta), coords[1] + dr*np.sin(theta)), dr = dr, dtheta = dtheta, theta = theta, potfile = potfile, in_glass = in_glass)
+            tmp_lmp =  QSR(lmp, coords = (coords[0] + dr*np.cos(theta), coords[1] + dr*np.sin(theta)), dr = dr, span = span, angles = (prev_theta, theta), potfile = potfile, in_glass = in_glass)
             Helper.chdir("..")
             Helper.command(f"mv {theta}/output.*.structure .")
             #Helper.command(f"mv {theta}/positions.*.dump .")
@@ -341,9 +372,8 @@ def main():
     lmp.velocity(f"all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
     lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
 
-    #Testing
 #    Helper.print("\n\nG:", quazi_static(lmp))
-    Helper.print("\n\nG:", quazi_static(lmp, 0.25, 60))
+    Helper.print("\n\nG:", quazi_static(lmp, 0.25, 45))
 
     return lmp
 

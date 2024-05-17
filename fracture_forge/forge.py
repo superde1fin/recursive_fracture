@@ -240,7 +240,7 @@ def copy_lmp(lmp, potfile, angles, dr, coords):
 @Lmpfunc
 def quazi_static(lmp, dr_frac = 0.1, dtheta = 10):
     Helper.print("start")
-    dr = dr_frac*max(lmp.eval("lx"), lmp.eval("ly"), lmp.eval("lz"))
+    dr = dr_frac*min(lmp.eval("lx"), lmp.eval("ly"), lmp.eval("lz"))
     create_surface(lmp)
     filename = glob.glob("glass_*.structure")[-1]
     name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()

@@ -2,7 +2,7 @@ from mpi4py import MPI
 from lammps import PyLammps
 import ctypes as ct
 import  glob, copy, os, sys
-from classes.Storage import Data, SystemParams, Helper, Lmpfunc
+from classes.Storage import Data, SystemParams, Helper, Lmpfunc, Fake_lmp
 import numpy as np
 import time, random
 import regex as re
@@ -232,7 +232,8 @@ def copy_lmp(lmp, potfile, angles, dr, coords):
     Helper.print("Time to copy:", time.time() - time2)
 
     new_lmp.run('0')
-    new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
+    if not Helper.output_ctr%100:
+        new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
     Helper.output_ctr += 1
     return new_lmp
 
@@ -264,12 +265,15 @@ def quazi_static(lmp, dr_frac = 0.1, dtheta = 10):
     else:
         angle_span = (dtheta*(np.pi/180), np.pi - dtheta*(np.pi/180), int(180/dtheta) - 1)
 
+    Helper.lowest_path_energy = float("inf")
+    Helper.fracture_memory = {}
+    Helper.mem_ctr = 0
+
     new_lmp = QSR(lmp = lmp, coords = start_coords, dr = dr, span = angle_span, angles = (np.pi/2, None), potfile = potfile, in_glass = False)
 
     new_lmp.write_data(f"output.{Helper.output_ctr}.structure")
-    Helper.output_ctr = 0
     
-    result = 0.69*(abs(lmp.eval("pe")) - abs(new_lmp.eval("pe")))/new_lmp.variables["surface_area"].value
+    result = 0.69*(new_lmp.eval("pe") - lmp.eval("pe"))/new_lmp.variables["surface_area"].value
 
     new_lmp.close()
     Helper.mkdir("../QS_results")
@@ -296,7 +300,14 @@ def QSR(lmp, coords, dr, span, angles, potfile, in_glass):
         lmp.variable(f"surface_area equal 0")
 
     if in_glass:
+        if coords in Helper.fracture_memory:
+            Helper.mem_ctr += 1
+            return Helper.fracture_memory[coords]
+
         lmp = copy_lmp(lmp, potfile, (prev_theta, theta), dr, coords)
+        if lmp.eval("pe") >= Helper.lowest_path_energy:
+            return lmp
+
         if coords[0] > lmp.system.xhi:
             dist = dr - (coords[0] - lmp.system.xhi)/np.cos(theta)
         elif coords[0] < lmp.system.xlo:
@@ -311,10 +322,13 @@ def QSR(lmp, coords, dr, span, angles, potfile, in_glass):
         lmp.variable(f"surface_area equal {lmp.variables['surface_area'].value + dist*lmp.eval('lz')}")
 
     if coords[0] >= lmp.system.xhi or coords[0] <= lmp.system.xlo or coords[1] >= SystemParams.parameters["old_bounds"][1]:
+        lowest_pot = lmp.eval("pe")
+        if lowest_pot < Helper.lowest_path_energy:
+            Helper.lowest_path_energy = lowest_pot
         return lmp
 
 
-    lowest_pot = float("infinity")
+    lowest_pot = float("inf")
     res_lmp = None
     prev_theta = theta
 
@@ -325,9 +339,10 @@ def QSR(lmp, coords, dr, span, angles, potfile, in_glass):
             Helper.chdir(f"{theta}")
             tmp_lmp =  QSR(lmp, coords = (coords[0] + dr*np.cos(theta), coords[1] + dr*np.sin(theta)), dr = dr, span = span, angles = (prev_theta, theta), potfile = potfile, in_glass = in_glass)
             Helper.chdir("..")
-            Helper.command(f"mv {theta}/output.*.structure .")
+            if re.search(r"output\.\d+\.structure", ' '.join(os.listdir(f"{theta}"))):
+                Helper.command(f"mv {theta}/output.*.structure .")
             #Helper.command(f"mv {theta}/positions.*.dump .")
-            new_pe = abs(tmp_lmp.eval("pe"))
+            new_pe = tmp_lmp.eval("pe")
             Helper.print(f"lowest pe: {new_pe}")
             if new_pe < lowest_pot:
                 if os.path.isfile(f"{theta}/log.lammps"):
@@ -342,6 +357,10 @@ def QSR(lmp, coords, dr, span, angles, potfile, in_glass):
                 tmp_lmp.close()
 
             Helper.rmtree(f"{theta}", ignore_errors = True)
+
+
+    Helper.fracture_memory[coords] = Fake_lmp(lowest_pot)
+
     Helper.command("cat tmp_path.txt >> path.txt")
     Helper.command("cat tmp_log.lammps >> log.lammps")
     Helper.command("rm tmp_path.txt")
@@ -373,7 +392,7 @@ def main():
     lmp.minimize(f"1.0e-8 1.0e-8 {convert_timestep(lmp, 0.01)} {convert_timestep(lmp, 0.1)}")
 
 #    Helper.print("\n\nG:", quazi_static(lmp))
-    Helper.print("\n\nG:", quazi_static(lmp, 0.25, 45))
+    Helper.print("\n\nG:", quazi_static(lmp, 0.1, 10))
 
     return lmp
 

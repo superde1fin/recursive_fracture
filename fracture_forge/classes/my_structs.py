@@ -1,13 +1,15 @@
 from lammps import lammps
-from classes.Storage import SystemParams, Data, Helper
+from classes.Storage import SystemParams, Helper
 import glob, os
 import numpy as np
 import ctypes as ct
 import regex as re
 
 class FracTree:
-    def __init__(self, error = 0.1, start_buffer = 0.5):
-        self.__head = Node(is_head = True)
+    def __init__(self, error = 0.1, start_buffer = 0.5, test_mode = False, non_inter_cutoff = 5, simulation_temp = 300):
+        self.__non_inter_cutoff = non_inter_cutoff
+        self.__test_mode = test_mode
+        self.__head = Node(is_head = True, test_mode = self.__test_mode)
         self.__grid_size = error/np.sqrt(2)
         self.__node_ctr = 1
         head_lmp = self.__head.get_lmp()
@@ -21,11 +23,11 @@ class FracTree:
                 min_y = atom[1]
             if atom[1] > max_y:
                 max_y = atom[1]
-        SystemParams.parameters["old_bounds"] = (min_y, max_y)
+        self.__old_bounds = (min_y, max_y)
 
-        Helper.print("Old bounds:", SystemParams.parameters["old_bounds"])
-        #head_lmp.command(f"change_box all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
-        #head_lmp.command(f"fix surface_relax all npt temp {SystemParams.parameters['simulation_temp']} {SystemParams.parameters['simulation_temp']} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
+        Helper.print("Old bounds:", self.__old_bounds)
+        #head_lmp.command(f"change_box all y delta {-non_inter_cutoff} {non_inter_cutoff}")
+        #head_lmp.command(f"fix surface_relax all npt temp {simulation_temp} {simulation_temp} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
         #head_lmp.command(f"run {Helper.convert_timestep(head_lmp, 0.1)}")
         #head_lmp.command("unfix surface_relax")
         """End of surface creation"""
@@ -33,18 +35,22 @@ class FracTree:
         box = head_lmp.extract_box()
         self.__box = box
         x_side = box[1][0] - box[0][0]
-        start_pos = (x_side/2 + box[0][0], SystemParams.parameters["old_bounds"][0] - start_buffer)
+        start_pos = (x_side/2 + box[0][0], self.__old_bounds[0] - start_buffer)
         self.__head.set_tip(self.__discretize(start_pos))
         self.__nodes_hash = {self.__head.get_pos() : self.__head}
 
 
     def build(self, dtheta, dr, interactions = "default"):
+        if interactions == "default":
+            self.__type_groups = 1
+        else:
+            self.__type_groups = max(sum(interactions, ()))
         x_side = self.__box[1][0] - self.__box[0][0]
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        self.__modify_potfile(interactions, groups = Data.type_groups)
+        self.__initial_types = self.__head.get_lmp().extract_global("ntypes")
+        self.__modify_potfile(interactions)
         self.__dr = dr
         #Check so that surface regions don't overlap through a periodix x boundary
-        if dtheta*(np.pi/180) < np.arcsin(2*Data.non_inter_cutoff/x_side):
+        if dtheta*(np.pi/180) < np.arcsin(2*self.__non_inter_cutoff/x_side):
             self.__angle_span = (2*dtheta*(np.pi/180), np.pi - 2*dtheta*(np.pi/180), int(180/dtheta) - 3)
         else:
             self.__angle_span = (dtheta*(np.pi/180), np.pi - dtheta*(np.pi/180), int(180/dtheta) - 1)
@@ -53,65 +59,83 @@ class FracTree:
         self.__generate_nodes(coords = self.__head.get_pos())
 
 
-    def calculate(self, save_dir = "out_structs"):
-        Helper.lowest_path_energy = float("inf")
-        Helper.fracture_memory = {}
-        Helper.output_ctr = 0
+    def calculate(self, save_dir = "out_structs", outp_freq = 1):
+        if os.path.isdir(save_dir):
+            os.system(f"rm -r {save_dir}")
+        os.mkdir(save_dir)
+
+        self.__outp_freq = outp_freq
+        self.__lowest_path_energy = float("inf")
         self.__save_dir = save_dir
         self.__head.activate()
         starting_pe = self.__head.get_lmp().get_thermo("pe")
 
         lowest_pe = self.__calc_subtree(self.__head)
 
-        node.get_lowest_leaf().get_lmp().comand("write_data result.structure")
+        self.__head.get_lowest_leaf().get_lmp().command("write_data result.structure")
 
         return (lowest_pe - starting_pe)/self.__surface_area
 
     def __calc_subtree(self, node):
-        #print("On node with coords:", node.get_pos())
         if node.is_leaf():
-            return node.get_path_pe()
+            pe = node.get_path_pe()
+            if pe < self.__lowest_path_energy:
+                self.__lowest_path_energy = pe
+            return pe
         else:
             lowest_pot = float("inf")
-            for child in node.get_children():
+            to_terminate = list()
+            children = node.get_children()
+            lowest_child = None
+            for child in children:
                 if not child.is_active():
-                    child.activate()
-                    child.get_lmp().command(f"write_data {self.__save_dir}/output.{Helper.output_ctr}.structure")
-                    Helper.output_ctr += 1
-                    res_pe = self.__calc_subtree(child)
+                    child.activate(initial_types = self.__initial_types, dr = self.__dr, potfile = self.__new_potfile, test_mode = self.__test_mode, type_groups = self.__type_groups, non_inter_cutoff = self.__non_inter_cutoff)
+                    if not child.get_id()%self.__outp_freq:
+                        child.get_lmp().command(f"write_data {self.__save_dir}/output.{child.get_id()}.structure")
+                    if child.get_lmp().get_thermo("pe") > self.__lowest_path_energy:
+                        res_pe = float("inf")
+                        child.set_path_pe(res_pe)
+                    else:
+                        res_pe = self.__calc_subtree(child)
                 else:
                     res_pe = child.get_path_pe()
                 if res_pe < lowest_pot:
                     lowest_pot = res_pe
                     lowest_child = child
+
+            for child in children:
+                if child is not lowest_child:
+                    child.get_lmp().close()
             node.set_path_pe(lowest_pot)
-            node.set_lowest_leaf(lowest_child.get_lowest_leaf())
+            if lowest_child:
+                node.set_lowest_leaf(lowest_child.get_lowest_leaf())
+            else:
+                node.set_lowest_leaf(None)
             return lowest_pot
 
 
     def __generate_nodes(self, coords, parent = None, theta = None, in_glass = False):
-        if not in_glass and coords[1] >= SystemParams.parameters["old_bounds"][0]:
+        if not in_glass and coords[1] >= self.__old_bounds[0]:
             in_glass = True
             self.__surface_area = 0
 
         if in_glass:
-            #print("Attaching node at:", coords)
             parent = self.attach(coords, node = parent, angle = theta)
 
             if coords[0] > self.__box[1][0]:
                 dist = self.__dr - (coords[0] - self.__box[1][0])/np.cos(theta)
             elif coords[0] < self.__box[0][0]:
                 dist = self.__dr - (self.__box[0][0] - coords[0])/np.sin(np.pi - theta)
-            elif coords[1] > SystemParams.parameters["old_bounds"][1]:
-                dist = self.__dr - (coords[1] - SystemParams.parameters["old_bounds"][1])/np.sin(theta)
-            elif coords[1] - self.__dr*np.sin(theta) < SystemParams.parameters["old_bounds"][0]:
-                dist = (coords[1] - SystemParams.parameters["old_bounds"][0])/np.sin(theta)
+            elif coords[1] > self.__old_bounds[1]:
+                dist = self.__dr - (coords[1] - self.__old_bounds[1])/np.sin(theta)
+            elif coords[1] - self.__dr*np.sin(theta) < self.__old_bounds[0]:
+                dist = (coords[1] - self.__old_bounds[0])/np.sin(theta)
             else:
                 dist = self.__dr
 
             self.__surface_area += dist*(self.__box[1][2] - self.__box[0][2])
 
-        if coords[0] >= self.__box[1][0] or coords[0] <= self.__box[0][0] or coords[1] >= SystemParams.parameters["old_bounds"][1]:
+        if coords[0] >= self.__box[1][0] or coords[0] <= self.__box[0][0] or coords[1] >= self.__old_bounds[1]:
             return
 
         for theta in np.linspace(*self.__angle_span):
@@ -139,7 +163,7 @@ class FracTree:
             new_node = self.__nodes_hash[self.__discretize(coords)]
         else:
             self.__node_ctr += 1
-            new_node = Node(tip = self.__discretize(coords), parent = node, angle = angle)
+            new_node = Node(tip = self.__discretize(coords), parent = node, angle = angle, node_ctr = self.__node_ctr)
             self.__nodes_hash[self.__discretize(coords)] = new_node
         node.attach(new_node)
         return new_node
@@ -147,8 +171,9 @@ class FracTree:
     def flatten(self):
         return self.__nodes_hash.values()
 
-    def __modify_potfile(self, interactions, groups = 2):
-        ntypes = Data.initial_types
+    def __modify_potfile(self, interactions):
+        groups = self.__type_groups
+        ntypes = self.__initial_types
         if interactions == "default":
             interactions = []
             for g in range(2, groups + 1):
@@ -191,12 +216,13 @@ class FracTree:
         new_text = general_type_re.sub(type_names, new_text)
         new_potfile.write(new_text)
 
-        self.__head.potfile = name
+        self.__new_potfile = name
 
         
 
 class Node:
-    def __init__(self, parent = None, is_head = False, tip = None, units = "real", angle = np.pi/2):
+    def __init__(self, parent = None, is_head = False, tip = None, units = "real", angle = np.pi/2, test_mode = False, node_ctr = 0):
+        self.__id = node_ctr
         self.__active = False
         self.__is_head = is_head
         self.__children = list()
@@ -206,20 +232,27 @@ class Node:
         self.__prev_theta = self.get_parent_angle()
 
         if self.__is_head:
-            #Testing
-            #self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
-            self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{Helper.output_ctr}.lammps"])
+            if test_mode:
+                if os.path.isdir("logs"):
+                    os.system("rm -r logs")
+                os.mkdir("logs")
+                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.0.lammps"])
+            else:
+                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
             self.__system_parameters_initialization(units = units)
             filename = glob.glob("glass_*.structure")[-1]
             self.__lmp.command(f"read_data {filename}")
             name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
-            self.potfile = f"pot_{name_handle}.FF"
+            self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
 
     def get_parent_angle(self):
         if self.__parent:
             return self.__parent.__theta
         else:
             return np.pi/2
+
+    def get_id(self):
+        return self.__id
 
     def get_parent(self):
         return self.__parent
@@ -247,24 +280,30 @@ class Node:
     def is_active(self):
         return self.__active
 
-    def activate(self, old_lmp = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None):
+    def activate(self, initial_types = None, type_groups = None, non_inter_cutoff = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False):
         self.__active = True
         if self.__is_head:
             self.__lmp.command(f"variable home_dir string {os.getcwd()}")
             self.__lmp.command(f"include {self.potfile}")
+            print("Head node activated")
         else:
-            #Testing
-            #self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
-            self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{Helper.output_ctr}.lammps"])
+            pos = self.get_pos()
+            print(f"Node {self.__id} activated at x = {pos[0]}, y = {pos[1]}")
+            old_lmp = self.__parent.get_lmp()
+            if test_mode:
+                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{self.__id}.lammps"])
+            else:
+                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
+
             self.__system_parameters_initialization(units = units)
             self.dr = dr
 
             self.__transfer_vars(old_lmp)
             self.__system_parameters_initialization(units = units)
             self.__lmp.command(f"timestep {timestep}")
-            box = old.lmp.extract_box()
-            self.__lmp.command(f"region my_simbox {box[0][0]} {box[1][0]} {box[0][1]} {box[1][1]} {box[0][2]} {box[1][2]}")
-            self.__lmp.command(f"create_box {Data.initial_types*Data.type_groups} my_simbox")
+            box = old_lmp.extract_box()
+            self.__lmp.command(f"region my_simbox block {box[0][0]} {box[1][0]} {box[0][1]} {box[1][1]} {box[0][2]} {box[1][2]}")
+            self.__lmp.command(f"create_box {initial_types*type_groups} my_simbox")
             self.__vizualization(thermo_step, dump_step)
             self.__lmp.command(f"include {potfile}")
 
@@ -272,24 +311,23 @@ class Node:
             types = np.array(old_lmp.gather_atoms("type", 0, 1), dtype = ct.c_double)
             self.box_side = box[1][0] - box[0][0]
             
-            for i in range(self.__lmp.get_natoms()):
+            for i in range(old_lmp.get_natoms()):
                 float_pos = my_atoms[i]
-                if types[i] <= Data.initial_types:
-                    group = near_surface(float_pos[:-1], Data.non_inter_cutoff)
-                    new_type = int(types[i]) + (group - 1)*Data.initial_types
-                elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
+                if types[i] <= initial_types:
+                    group = self.__near_surface(float_pos[:-1], non_inter_cutoff)
+                    new_type = int(types[i]) + (group - 1)*initial_types
+                elif types[i] > initial_types and types[i] <= 3*initial_types:
                     new_type = int(types[i])
                 else:
-                    group = near_surface(float_pos[:-1], Data.non_inter_cutoff)
-                    tp = int(types[i])%Data.initial_types
-                    tp = tp if tp else tp + Data.initial_types
-                    new_type = tp + (group - 1)*Data.initial_types
+                    group = self.__near_surface(float_pos[:-1], non_inter_cutoff)
+                    tp = int(types[i])%initial_types
+                    tp = tp if tp else tp + initial_types
+                    new_type = tp + (group - 1)*initial_types
 
                 position = " ".join(map(str, float_pos))
                 self.__lmp.command(f"create_atoms {new_type} single {position}")
 
 
-        self.__lmp.command(f"velocity all create {SystemParams.parameters['simulation_temp']} 12345 dist gaussian")
         self.__lmp.command("run 0")
 
         self.potfile = potfile
@@ -375,7 +413,7 @@ class Node:
         
 
     def __transfer_vars(self, lmp):
-        self.__lmp.variable(f"home_dir string {lmp.extract_variable('home_dir')}")
+        self.__lmp.command(f"variable home_dir string {lmp.extract_variable('home_dir')}")
 
     def __system_parameters_initialization(self, units):
         self.__lmp.command(f"units {units}")
@@ -393,6 +431,5 @@ class Node:
 
         #Computes
         self.__lmp.command("compute pe_pa all pe/atom")
-    #    self.__lmp.command(f"dump my_dump all atom {dump_step} positions.{Helper.output_ctr}.dump")
     def get_lmp(self):
         return self.__lmp

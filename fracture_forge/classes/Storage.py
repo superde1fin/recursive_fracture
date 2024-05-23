@@ -6,9 +6,6 @@ class Data:
                 "real" : {"timestep" : 1e-15,}, 
                 "metal" : {"timestep" : 1e-12},
                 }
-    non_inter_cutoff = 10
-    initial_types = 2
-    type_groups = 5
 
 class SystemParams:
     parameters = {
@@ -54,22 +51,4 @@ class Helper:
     @staticmethod
     def convert_timestep(lmp, step): #ns  - step
         return int((step*1e-9)/(lmp.eval("dt")*Data.units_data[SystemParams.parameters["units"]]["timestep"]))
-
-    output_ctr = 0
-
-class Fake_lmp:
-    def __init__(self, energy):
-        self.energy = energy
-
-    def eval(self, handle):
-        if handle == "pe":
-            return self.energy
-        else:
-            return float("inf")
-
-    def __bool__(self):
-        return False
-
-    def close(self):
-        pass
 

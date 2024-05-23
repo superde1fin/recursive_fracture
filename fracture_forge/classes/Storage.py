@@ -51,5 +51,25 @@ class Helper:
         if MPI.COMM_WORLD.Get_rank() == Helper.action_proc:
             shutil.rmtree(*args, **kwargs)
 
+    @staticmethod
+    def convert_timestep(lmp, step): #ns  - step
+        return int((step*1e-9)/(lmp.eval("dt")*Data.units_data[SystemParams.parameters["units"]]["timestep"]))
+
     output_ctr = 0
+
+class Fake_lmp:
+    def __init__(self, energy):
+        self.energy = energy
+
+    def eval(self, handle):
+        if handle == "pe":
+            return self.energy
+        else:
+            return float("inf")
+
+    def __bool__(self):
+        return False
+
+    def close(self):
+        pass
 

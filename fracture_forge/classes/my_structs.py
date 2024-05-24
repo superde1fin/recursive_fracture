@@ -331,14 +331,20 @@ class Node:
                 float_pos = my_atoms[i]
                 if types[i] <= initial_types:
                     group = self.__near_surface(float_pos[:-1], non_inter_cutoff)
-                    new_type = int(types[i]) + (group - 1)*initial_types
+                    if group <= type_groups:
+                        new_type = int(types[i]) + (group - 1)*initial_types
+                    else:
+                        new_type = types[i]
                 elif types[i] > initial_types and types[i] <= 3*initial_types:
                     new_type = int(types[i])
                 else:
                     group = self.__near_surface(float_pos[:-1], non_inter_cutoff)
-                    tp = int(types[i])%initial_types
-                    tp = tp if tp else tp + initial_types
-                    new_type = tp + (group - 1)*initial_types
+                    if group <= type_groups:
+                        tp = int(types[i])%initial_types
+                        tp = tp if tp else tp + initial_types
+                        new_type = tp + (group - 1)*initial_types
+                    else:
+                        new_type = types[i]
 
                 position = " ".join(map(str, float_pos))
                 self.__lmp.command(f"create_atoms {new_type} single {position}")

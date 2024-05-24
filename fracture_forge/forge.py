@@ -64,11 +64,9 @@ def main():
     print("Number of nodes created:", len(tree))
 
 
-    """
     data_dir = "out_files" 
     res = 0.69*tree.calculate(data_dir)
     print("G:", res)
-    """
 
     visualize(tree, dr, dtheta)
 

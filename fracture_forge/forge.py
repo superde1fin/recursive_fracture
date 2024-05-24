@@ -53,7 +53,7 @@ def visualize(tree, dr, dtheta):
 
 def main():
 
-    dr = 30
+    dr = 10
     error = 0.1
     dtheta = 30
     interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
@@ -64,9 +64,12 @@ def main():
     print("Number of nodes created:", len(tree))
 
 
+    """
     data_dir = "out_files" 
     res = 0.69*tree.calculate(data_dir)
     print("G:", res)
+    """
+
     visualize(tree, dr, dtheta)
 
 

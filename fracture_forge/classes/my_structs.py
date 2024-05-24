@@ -58,6 +58,26 @@ class FracTree:
         
         self.__generate_nodes(coords = self.__head.get_pos())
 
+    def __generate_nodes(self, coords, parent = None, theta = None, in_glass = False):
+        if not in_glass and coords[1] >= self.__old_bounds[0]:
+            in_glass = True
+
+        if in_glass:
+            if coords[0] >= self.__box[1][0] or coords[0] <= self.__box[0][0]:
+                return
+            parent = self.attach(coords, node = parent, angle = theta)
+
+
+        if coords[1] >= self.__old_bounds[1]:
+            return
+
+        if theta:
+            for theta in np.linspace(*self.__angle_span):
+                self.__generate_nodes(coords = (coords[0] + self.__dr*np.cos(theta), coords[1] + self.__dr*np.sin(theta)), parent = parent, theta = theta, in_glass = in_glass)
+        else:
+            for x in np.linspace(self.__box[0][0] + self.__dr*0.2, self.__box[1][0] - self.__dr*0.2, int((self.__box[1][0] - self.__box[0][0] - self.__dr*0.4)/self.__dr)):
+                self.__generate_nodes(coords = (x, self.__box[0][1] + self.__dr*0.2), parent = parent, theta = np.pi/2, in_glass = in_glass)
+
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         if os.path.isdir(save_dir):
@@ -72,9 +92,10 @@ class FracTree:
 
         lowest_pe = self.__calc_subtree(self.__head)
 
-        self.__head.get_lowest_leaf().get_lmp().command("write_data result.structure")
+        lowest_leaf = self.__head.get_lowest_leaf()
+        lowest_leaf.get_lmp().command("write_data result.structure")
 
-        return (lowest_pe - starting_pe)/self.__surface_area
+        return (lowest_pe - starting_pe)/lowest_leaf.get_surface_area()
 
     def __calc_subtree(self, node):
         if node.is_leaf():
@@ -89,7 +110,8 @@ class FracTree:
             lowest_child = None
             for child in children:
                 if not child.is_active():
-                    child.activate(initial_types = self.__initial_types, dr = self.__dr, potfile = self.__new_potfile, test_mode = self.__test_mode, type_groups = self.__type_groups, non_inter_cutoff = self.__non_inter_cutoff)
+                    child.set_parent(node)
+                    child.activate(initial_types = self.__initial_types, dr = self.__dr, potfile = self.__new_potfile, test_mode = self.__test_mode, type_groups = self.__type_groups, non_inter_cutoff = self.__non_inter_cutoff, old_bounds = self.__old_bounds)
                     if not child.get_id()%self.__outp_freq:
                         child.get_lmp().command(f"write_data {self.__save_dir}/output.{child.get_id()}.structure")
                     if child.get_lmp().get_thermo("pe") > self.__lowest_path_energy:
@@ -114,32 +136,6 @@ class FracTree:
             return lowest_pot
 
 
-    def __generate_nodes(self, coords, parent = None, theta = None, in_glass = False):
-        if not in_glass and coords[1] >= self.__old_bounds[0]:
-            in_glass = True
-            self.__surface_area = 0
-
-        if in_glass:
-            parent = self.attach(coords, node = parent, angle = theta)
-
-            if coords[0] > self.__box[1][0]:
-                dist = self.__dr - (coords[0] - self.__box[1][0])/np.cos(theta)
-            elif coords[0] < self.__box[0][0]:
-                dist = self.__dr - (self.__box[0][0] - coords[0])/np.sin(np.pi - theta)
-            elif coords[1] > self.__old_bounds[1]:
-                dist = self.__dr - (coords[1] - self.__old_bounds[1])/np.sin(theta)
-            elif coords[1] - self.__dr*np.sin(theta) < self.__old_bounds[0]:
-                dist = (coords[1] - self.__old_bounds[0])/np.sin(theta)
-            else:
-                dist = self.__dr
-
-            self.__surface_area += dist*(self.__box[1][2] - self.__box[0][2])
-
-        if coords[0] >= self.__box[1][0] or coords[0] <= self.__box[0][0] or coords[1] >= self.__old_bounds[1]:
-            return
-
-        for theta in np.linspace(*self.__angle_span):
-            self.__generate_nodes(coords = (coords[0] + self.__dr*np.cos(theta), coords[1] + self.__dr*np.sin(theta)), parent = parent, theta = theta, in_glass = in_glass)
 
     def get_box(self):
         return self.__box
@@ -229,7 +225,7 @@ class Node:
         self.__tip = tip
         self.__parent = parent
         self.__theta = angle
-        self.__prev_theta = self.get_parent_angle()
+        self.__surface_area = 0
 
         if self.__is_head:
             if test_mode:
@@ -280,15 +276,20 @@ class Node:
     def is_active(self):
         return self.__active
 
-    def activate(self, initial_types = None, type_groups = None, non_inter_cutoff = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False):
+    def set_parent(self, node):
+        self.__parent = node
+
+    def get_surface_area(self):
+        return self.__surface_area
+
+    def activate(self, initial_types = None, type_groups = None, non_inter_cutoff = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False, old_bounds = None):
         self.__active = True
         if self.__is_head:
             self.__lmp.command(f"variable home_dir string {os.getcwd()}")
             self.__lmp.command(f"include {self.potfile}")
             print("Head node activated")
         else:
-            pos = self.get_pos()
-            print(f"Node {self.__id} activated at x = {pos[0]}, y = {pos[1]}")
+
             old_lmp = self.__parent.get_lmp()
             if test_mode:
                 self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{self.__id}.lammps"])
@@ -297,11 +298,26 @@ class Node:
 
             self.__system_parameters_initialization(units = units)
             self.dr = dr
+            self.__prev_theta = self.get_parent_angle()
 
             self.__transfer_vars(old_lmp)
             self.__system_parameters_initialization(units = units)
             self.__lmp.command(f"timestep {timestep}")
             box = old_lmp.extract_box()
+
+            if self.__tip[0] > box[1][0]:
+                dist = dr - (self.__tip[0] - box[1][0])/np.cos(self.__theta)
+            elif self.__tip[0] < box[0][0]:
+                dist = dr - (box[0][0] - self.__tip[0])/np.sin(np.pi - self.__theta)
+            elif self.__tip[1] > old_bounds[1]:
+                dist = dr - (self.__tip[1] - old_bounds[1])/np.sin(self.__theta)
+            elif self.__tip[1] - dr*np.sin(self.__theta) < old_bounds[0]:
+                dist = (self.__tip[1] - old_bounds[0])/np.sin(self.__theta)
+            else:
+                dist = dr
+
+            self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
+
             self.__lmp.command(f"region my_simbox block {box[0][0]} {box[1][0]} {box[0][1]} {box[1][1]} {box[0][2]} {box[1][2]}")
             self.__lmp.command(f"create_box {initial_types*type_groups} my_simbox")
             self.__vizualization(thermo_step, dump_step)
@@ -335,6 +351,8 @@ class Node:
         if self.is_leaf():
             self.__lowest_leaf = self
             self.__path_pe = self.__lmp.get_thermo("pe")
+
+        print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
 
 
     def set_path_pe(self, pe):

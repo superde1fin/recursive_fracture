@@ -334,7 +334,7 @@ class Node:
                     if group <= type_groups:
                         new_type = int(types[i]) + (group - 1)*initial_types
                     else:
-                        new_type = types[i]
+                        new_type = int(types[i])
                 elif types[i] > initial_types and types[i] <= 3*initial_types:
                     new_type = int(types[i])
                 else:
@@ -344,7 +344,7 @@ class Node:
                         tp = tp if tp else tp + initial_types
                         new_type = tp + (group - 1)*initial_types
                     else:
-                        new_type = types[i]
+                        new_type = int(types[i])
 
                 position = " ".join(map(str, float_pos))
                 self.__lmp.command(f"create_atoms {new_type} single {position}")

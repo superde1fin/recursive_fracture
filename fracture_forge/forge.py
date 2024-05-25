@@ -1,5 +1,5 @@
 import  os, sys
-from classes.Storage import SystemParams, Helper
+from classes.Storage import Data, SystemParams, Helper
 from classes.my_structs import FracTree
 import numpy as np
 
@@ -57,9 +57,9 @@ def main():
     error = 0.1
     dtheta = 30
     interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
-    cutoff = 10
+    Data.non_inter_cutoff = 10
     simulation_temp = 300
-    tree = FracTree(error = error, start_buffer = dr/2, non_inter_cutoff = cutoff, test_mode = False, simulation_temp = 300)
+    tree = FracTree(error = error, start_buffer = dr/2, test_mode = False, simulation_temp = 300)
     tree.build(dtheta = dtheta, dr = dr, interactions = interactions)
     print("Number of nodes created:", len(tree))
 

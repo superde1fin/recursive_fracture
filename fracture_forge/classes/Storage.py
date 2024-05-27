@@ -1,4 +1,4 @@
-import sys, os, shutil
+import sys, os, shutil, time
 from mpi4py import MPI
 
 class Data:
@@ -6,6 +6,7 @@ class Data:
                 "real" : {"timestep" : 1e-15,}, 
                 "metal" : {"timestep" : 1e-12},
                 }
+    backward_buffer = 0.5
 
 class SystemParams:
     parameters = {
@@ -51,4 +52,6 @@ class Helper:
     @staticmethod
     def convert_timestep(lmp, step): #ns  - step
         return int((step*1e-9)/(lmp.eval("dt")*Data.units_data[SystemParams.parameters["units"]]["timestep"]))
+
+
 

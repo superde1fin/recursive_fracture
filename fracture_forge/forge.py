@@ -53,7 +53,7 @@ def visualize(tree, dr, dtheta):
 
 def main():
 
-    dr = 10
+    dr = 15
     error = 0.1
     dtheta = 30
     interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]

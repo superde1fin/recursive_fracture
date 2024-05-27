@@ -1,9 +1,10 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os
+import glob, os, sys
 import numpy as np
 import ctypes as ct
 import regex as re
+
 
 class FracTree:
     def __init__(self, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300):
@@ -12,6 +13,8 @@ class FracTree:
         self.__grid_size = error/np.sqrt(2)
         self.__node_ctr = 1
         head_lmp = self.__head.get_lmp()
+        sys.setrecursionlimit(head_lmp.get_natoms())
+
 
         """Surface creation"""
         min_y = float("inf")
@@ -50,6 +53,18 @@ class FracTree:
 
     def flatten(self):
         return self.__nodes_hash.values()
+
+    def __get_id_neighlist(self):
+        lmp = self.__head.get_lmp()
+        tags = lmp.extract_atom("id")
+        id_neighlist = [set() for _ in range(lmp.get_natoms() + 1)]
+        nlist_id = lmp.find_pair_neighlist("table")
+        table_neighs = lmp.numpy.get_neighlist(nlist_id)
+        for atom_num, neighs in table_neighs:
+            for neigh_num in neighs:
+                id_neighlist[tags[atom_num]].add(tags[neigh_num])
+                id_neighlist[tags[neigh_num]].add(tags[atom_num])
+        return id_neighlist
 
     #Main behavior
     def __discretize(self, coords):
@@ -91,7 +106,10 @@ class FracTree:
             for theta in np.linspace(*self.__angle_span):
                 self.__generate_nodes(coords = (coords[0] + self.__dr*np.cos(theta), coords[1] + self.__dr*np.sin(theta)), parent = parent, theta = theta, in_glass = in_glass)
         else:
-            for x in np.linspace(self.__box[0][0] + self.__dr*0.2, self.__box[1][0] - self.__dr*0.2, int((self.__box[1][0] - self.__box[0][0] - self.__dr*0.4)/self.__dr)):
+            span = np.linspace(self.__box[0][0] + self.__dr*0.2, self.__box[1][0] - self.__dr*0.2, int((self.__box[1][0] - self.__box[0][0] - self.__dr*0.4)/self.__dr) + 1)
+            if len(span) == 1:
+                span = [(self.__box[1][0] - self.__box[0][0])/2]
+            for x in span:
                 self.__generate_nodes(coords = (x, self.__box[0][1] + self.__dr*0.2), parent = parent, theta = np.pi/2, in_glass = in_glass)
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
@@ -103,6 +121,9 @@ class FracTree:
         self.__lowest_path_energy = float("inf")
         self.__save_dir = save_dir
         self.__head.activate()
+        self.__head.get_lmp().command(f"write_data {self.__save_dir}/output.{self.__head.get_id()}.structure")
+        Data.neigh_list = self.__get_id_neighlist()
+        print("Finished full neighbor list calculation")
         starting_pe = self.__head.get_lmp().get_thermo("pe")
 
         lowest_pe = self.__calc_subtree(self.__head)
@@ -126,6 +147,7 @@ class FracTree:
             for child in children:
                 if not child.is_active():
                     child.set_parent(node)
+                    #print(f"Current parent is at x = {node.get_pos()[0]}, y = {node.get_pos()[1]}")
                     child.activate(dr = self.__dr, potfile = self.__new_potfile, test_mode = self.__test_mode)
                     if not child.get_id()%self.__outp_freq:
                         child.get_lmp().command(f"write_data {self.__save_dir}/output.{child.get_id()}.structure")
@@ -250,6 +272,12 @@ class Node:
         return self
 
     def set_parent(self, node):
+        node_pos = node.get_pos()
+        if node.is_head() or not (self.__tip[0] - node_pos[0]):
+            self.__theta = np.pi/2
+        else:
+            self.__theta = np.arctan((self.__tip[1] - node_pos[1])/(self.__tip[0] - node_pos[0]))
+            self.__theta = self.__theta if self.__theta >= 0 else np.pi + self.__theta
         self.__parent = node
 
     def set_lowest_leaf(self, node):
@@ -319,10 +347,12 @@ class Node:
 
 
     def activate(self, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False):
+
         self.__active = True
         if self.__is_head:
             self.__lmp.command(f"variable home_dir string {os.getcwd()}")
             self.__lmp.command(f"include {self.potfile}")
+            self.__lmp.command("replicate 3 3 3")
             print("Head node activated")
         else:
 
@@ -361,8 +391,10 @@ class Node:
 
             my_atoms = np.array(old_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
             types = np.array(old_lmp.gather_atoms("type", 0, 1), dtype = ct.c_double)
+            ids = np.array(old_lmp.gather_atoms("id", 0, 1), dtype = ct.c_double)
             self.box_side = box[1][0] - box[0][0]
 
+            #self.__fast_cut(my_atoms, types, old_lmp.get_natoms())
             self.__cut(my_atoms, types, old_lmp.get_natoms())
             print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
             
@@ -376,41 +408,66 @@ class Node:
 
 
     def __fast_cut(self, my_atoms, types, natoms):
-        found = False
         i = 0
-        while not found and i < natoms:
+        found_first = False
+        while not found_first and i < natoms:
             float_pos = my_atoms[i]
-            group = self.__near_surface(float_pos[:-1])
-            if group > 1:
-                found = True
-            else:
+            new_type = self.__get_type(types[i], float_pos[:-1])
+            self.__lmp.command(f"create_atoms {new_type} single {' '.join(map(str, float_pos))}")
+            prev_type = types[i]
+            types[i] = 0
+            if prev_type == new_type:
                 i += 1
+            else:
+                found_first = True
 
 
+        self.__modify_types(types, my_atoms, i)
+
+        while i < natoms:
+            if types[i]:
+                self.__lmp.command(f"create_atoms {int(types[i])} single {' '.join(map(str, my_atoms[i]))}")
+            i += 1
+
+
+
+    def __modify_types(self, types, positions, index):
+        for neigh in Data.neigh_list[index + 1]:
+            if types[neigh - 1]:
+                new_type = self.__get_type(types[neigh - 1], positions[neigh - 1][:-1])
+                self.__lmp.command(f"create_atoms {new_type} single {' '.join(map(str, positions[neigh - 1]))}")
+                type_before = types[neigh - 1]
+                types[neigh - 1] = 0
+                if new_type != type_before:
+                    self.__modify_types(types, positions, neigh - 1)
+
+
+
+
+    def __get_type(self, old_type, coords):
+        if old_type > Data.initial_types and old_type <= 3*Data.initial_types:
+            return int(old_type)
+        else:
+            group = self.__near_surface(coords)
+            if group > 1 and group <= Data.type_groups:
+                if old_type <= Data.initial_types:
+                    return int(old_type) + (group - 1)*Data.initial_types
+                else:
+                    original_type = int(old_type)%Data.initial_types
+                    original_type = original_type if original_type else Data.initial_types
+                    return original_type + (group - 1)*Data.initial_types
+
+            else:
+                return int(old_type)
 
 
     def __cut(self, my_atoms, types, natoms):
         for i in range(natoms):
             float_pos = my_atoms[i]
-            if types[i] <= Data.initial_types:
-                group = self.__near_surface(float_pos[:-1])
-                if group <= Data.type_groups:
-                    new_type = int(types[i]) + (group - 1)*Data.initial_types
-                else:
-                    new_type = int(types[i])
-            elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
-                new_type = int(types[i])
-            else:
-                group = self.__near_surface(float_pos[:-1])
-                if group <= Data.type_groups:
-                    tp = int(types[i])%Data.initial_types
-                    tp = tp if tp else tp + Data.initial_types
-                    new_type = tp + (group - 1)*Data.initial_types
-                else:
-                    new_type = int(types[i])
-
+            new_type = self.__get_type(types[i], float_pos[:-1])
             position = " ".join(map(str, float_pos))
             self.__lmp.command(f"create_atoms {new_type} single {position}")
+
 
 
 
@@ -450,7 +507,8 @@ class Node:
 
         for x in [atom_pos[0], self.box_side + atom_pos[0], atom_pos[0] - self.box_side]:
         #Tail of the cut coverage at turns
-            if (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < cutoff) and (atom_pos[1] < np.polyval(f12, x)) and (atom_pos[1] > np.polyval(f99, x)):
+            #if (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) <= cutoff) and (atom_pos[1] <= np.polyval(f12, x)) and (atom_pos[1] >= np.polyval(f99, x)):
+            if (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) <= cutoff) and (atom_pos[1] <= np.polyval(f12, x)):
                 if (self.__prev_theta > self.__theta):
                     return 2
                 elif (self.__prev_theta < self.__theta):
@@ -461,18 +519,18 @@ class Node:
                     return 2
                 elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)):
                     return 3
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] + Data.backward_buffer*np.sin(self.__theta) >= np.polyval(f02, x)):
                     return 4
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] + Data.backward_buffer*np.sin(self.__theta) >= np.polyval(f02, x)):
                     return 5
             else:
                 if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f01, x)):
                     return 2
                 elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f31, x)):
                     return 3
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] + Data.backward_buffer*np.sin(self.__theta) >= np.polyval(f02, x)):
                     return 4
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] + Data.backward_buffer*np.sin(self.__theta) >= np.polyval(f02, x)):
                     return 5
 
         return 1

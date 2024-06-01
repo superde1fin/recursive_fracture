@@ -1,7 +1,8 @@
-import  os, sys
+import  os, sys, argparse
 from classes.Storage import Data, SystemParams, Helper
 from classes.my_structs import FracTree
 import numpy as np
+from argparse import RawTextHelpFormatter
 
 import matplotlib.pyplot as plt
 
@@ -50,25 +51,53 @@ def visualize(tree, dr, dtheta):
     plt.plot(x, y, marker = 'o', linestyle = 'None', color = "green")
     plt.show()
 
+def parser_call():
+    parser = argparse.ArgumentParser(formatter_class = RawTextHelpFormatter)
+    parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
+    parser.add_argument("-r", "--radius", type = int, default = SystemParams.dr, help = "Probe radius", metavar = "")
+    parser.add_argument("-e", "--error", type = int, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
+    parser.add_argument("-a", "--angle", type = int, default = SystemParams.dtheta, help = "Angle between the branches of the fracture tree", metavar = "")
+    parser.add_argument("-i", "--interactions", action = "store_true", help = "Prompts the user to specify interactions between type groups")
+    args = parser.parse_args()
+    
+    if args.interactions:
+        print("\nPlease specify the groups that are supposed to interact according to the employed force field.\nGroup 1 : non-surface, group 2 : top surface, group 3 : bottom_surface, group 4 : top tip, group 5 : bottom tip.\nRegions are only created if the interactions are specified.\nAfter all interactions have been provided press 0.\nFormat : 1 4\n")
+        interaction_list = list()
+        done = False
+        while not done:
+            inter_str = input().strip()
+            if inter_str == "0":
+                done = True
+            else:
+                try:
+                    pair = tuple(map(int, inter_str.split()))
+                    assert len(pair) == 2
+                    interaction_list.append(pair)
+                except:
+                    print("Incorrect format. Please input two integers separated by a space")
+        args.interactions = interaction_list
+    else:
+        args.interactions = SystemParams.interactions
+
+    return args
+
+
+
 
 def main():
+    args = parser_call()
+    print(args)
 
-    dr = 10
-    error = 0.1
-    dtheta = 30
-    interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
-    Data.non_inter_cutoff = 10
-    simulation_temp = 300
-    tree = FracTree(error = error, start_buffer = dr/2, test_mode = False, simulation_temp = 300)
-    tree.build(dtheta = dtheta, dr = dr, interactions = interactions)
+    tree = FracTree(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature)
+    tree.build(dtheta = args.angle, dr = args.radius, interactions = args.interactions)
     print("Number of nodes created:", len(tree))
 
 
     data_dir = "out_files" 
-    res = 0.69*tree.calculate(data_dir)
-    print("G:", res)
+    #res = 0.69*tree.calculate(data_dir)
+    #print("G:", res)
 
-    visualize(tree, dr, dtheta)
+    visualize(tree, args.radius, args.angle)
 
 
 

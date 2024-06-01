@@ -302,7 +302,7 @@ class Node:
 
     def __system_parameters_initialization(self, units):
         self.__lmp.command(f"units {units}")
-        SystemParams.parameters["units"] = units
+        SystemParams.units = units
         self.__lmp.command("atom_style charge")
         self.__lmp.command("boundary p p p")
         self.__lmp.command("comm_modify mode single vel yes")

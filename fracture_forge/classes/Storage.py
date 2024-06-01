@@ -6,19 +6,14 @@ class Data:
                 "real" : {"timestep" : 1e-15,}, 
                 "metal" : {"timestep" : 1e-12},
                 }
+    non_inter_cutoff = 10
 
 class SystemParams:
-    parameters = {
-            "simulation_temp" : 300
-            }
-
-class Lmpfunc:
-    def __init__(self, func):
-        self._func = func
-
-    def __call__(self, *args, **kwargs):
-        MPI.COMM_WORLD.Barrier()
-        return self._func(*args, **kwargs)
+    simulation_temp = 300
+    dr = 10
+    error = 0.1
+    interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
+    dtheta = 30
 
 class Helper:
     action_proc = 0

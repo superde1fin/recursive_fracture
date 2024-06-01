@@ -1,8 +1,8 @@
 mass    1 28.086  #Si
 mass    2 15.9994 #O
 
-variable        sw_path string "${home_dir}/../potentials/MahadevanDu/sw_sionah.UNT"
-variable        table_path string "${home_dir}/../potentials/MahadevanDu/MGSiOHNa.UNT"
+variable        sw_path string "../potentials/MahadevanDu/sw_sionah.UNT"
+variable        table_path string "../potentials/MahadevanDu/MGSiOHNa.UNT"
 
 pair_style      hybrid/overlay table linear 20000 sw
 pair_coeff      * * sw ${sw_path} Si O

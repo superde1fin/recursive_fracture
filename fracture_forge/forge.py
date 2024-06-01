@@ -2,7 +2,6 @@ import  os, sys, argparse
 from classes.Storage import Data, SystemParams, Helper
 from classes.my_structs import FracTree
 import numpy as np
-from argparse import RawTextHelpFormatter
 
 import matplotlib.pyplot as plt
 
@@ -52,13 +51,16 @@ def visualize(tree, dr, dtheta):
     plt.show()
 
 def parser_call():
-    parser = argparse.ArgumentParser(formatter_class = RawTextHelpFormatter)
+    parser = argparse.ArgumentParser()
     parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
     parser.add_argument("-r", "--radius", type = int, default = SystemParams.dr, help = "Probe radius", metavar = "")
     parser.add_argument("-e", "--error", type = int, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
     parser.add_argument("-a", "--angle", type = int, default = SystemParams.dtheta, help = "Angle between the branches of the fracture tree", metavar = "")
     parser.add_argument("-i", "--interactions", action = "store_true", help = "Prompts the user to specify interactions between type groups")
+    parser.add_argument("-s", "--structure", default = None, help = "System structure file in lammps format", metavar = "")
+    parser.add_argument("-f", "--force_field", default = None, help = "Forcfield defininf atom interactions", metavar = "")
     args = parser.parse_args()
+
     
     if args.interactions:
         print("\nPlease specify the groups that are supposed to interact according to the employed force field.\nGroup 1 : non-surface, group 2 : top surface, group 3 : bottom_surface, group 4 : top tip, group 5 : bottom tip.\nRegions are only created if the interactions are specified.\nAfter all interactions have been provided press 0.\nFormat : 1 4\n")
@@ -86,7 +88,8 @@ def parser_call():
 
 def main():
     args = parser_call()
-    print(args)
+    Data.structure_file = args.structure
+    Data.potfile = args.force_field
 
     tree = FracTree(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature)
     tree.build(dtheta = args.angle, dr = args.radius, interactions = args.interactions)
@@ -94,8 +97,8 @@ def main():
 
 
     data_dir = "out_files" 
-    #res = 0.69*tree.calculate(data_dir)
-    #print("G:", res)
+    res = 0.69*tree.calculate(data_dir)
+    print("G:", res)
 
     visualize(tree, args.radius, args.angle)
 

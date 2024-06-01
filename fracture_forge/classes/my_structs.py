@@ -109,8 +109,12 @@ class FracTree:
 
         lowest_leaf = self.__head.get_lowest_leaf()
         lowest_leaf.get_lmp().command("write_data result.structure")
+        try:
+            res = (lowest_pe - starting_pe)/lowest_leaf.get_surface_area()
+        except:
+            res = 0
 
-        return (lowest_pe - starting_pe)/lowest_leaf.get_surface_area()
+        return res
 
     def __calc_subtree(self, node):
         if node.is_leaf():
@@ -231,10 +235,16 @@ class Node:
             else:
                 self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
             self.__system_parameters_initialization(units = units)
-            filename = glob.glob("glass_*.structure")[-1]
+            if Data.structure_file:
+                filename = Data.structure_file
+            else:
+                filename = glob.glob("glass_*.structure")[-1]
             self.__lmp.command(f"read_data {filename}")
-            name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
-            self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
+            if Data.potfile:
+                self.potfile = Data.potfile
+            else:
+                name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
+                self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
             
 
     #Setters
@@ -297,9 +307,6 @@ class Node:
         return self.__active
 
     #Main behavior
-    def __transfer_vars(self, lmp):
-        self.__lmp.command(f"variable home_dir string {lmp.extract_variable('home_dir')}")
-
     def __system_parameters_initialization(self, units):
         self.__lmp.command(f"units {units}")
         SystemParams.units = units
@@ -321,7 +328,6 @@ class Node:
     def activate(self, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False):
         self.__active = True
         if self.__is_head:
-            self.__lmp.command(f"variable home_dir string {os.getcwd()}")
             self.__lmp.command(f"include {self.potfile}")
             print("Head node activated")
         else:
@@ -336,7 +342,6 @@ class Node:
             self.dr = dr
             self.__prev_theta = self.get_parent_angle()
 
-            self.__transfer_vars(old_lmp)
             self.__system_parameters_initialization(units = units)
             self.__lmp.command(f"timestep {timestep}")
             box = old_lmp.extract_box()

@@ -1,6 +1,6 @@
 import  os, sys, argparse
 from classes.Storage import Data, SystemParams, Helper
-from classes.my_structs import FracTree
+from classes.my_structs import FracGraph
 import numpy as np
 
 import matplotlib.pyplot as plt
@@ -30,18 +30,17 @@ def draw_lines(nodes, plt):
 
             plt.plot(line_x, line_y, color = "red")
 
-def visualize(tree, dr, dtheta):
-    nodes = tree.flatten()
+def visualize(graph, dr, dtheta):
+    nodes = graph.flatten()
+    points = np.array([node.get_pos() for node in nodes])
 
-    points = [node.get_pos() for node in nodes]
-
-    x = np.array(points)[:, 0]
-    y = np.array(points)[:, 1]
+    x = points[:, 0]
+    y = points[:, 1]
 
     #draw_arcs(nodes, plt, dtheta, dr)
-    draw_lines(nodes, plt)
+    #draw_lines(nodes, plt)
 
-    box = tree.get_box()
+    box = graph.get_box()
     plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black")
     plt.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], color = "black")
     plt.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], color = "black")
@@ -58,7 +57,9 @@ def parser_call():
     parser.add_argument("-a", "--angle", type = int, default = SystemParams.dtheta, help = "Angle between the branches of the fracture tree", metavar = "")
     parser.add_argument("-i", "--interactions", action = "store_true", help = "Prompts the user to specify interactions between type groups")
     parser.add_argument("-s", "--structure", default = None, help = "System structure file in lammps format", metavar = "")
-    parser.add_argument("-f", "--force_field", default = None, help = "Forcfield defininf atom interactions", metavar = "")
+    parser.add_argument("-f", "--force_field", default = None, help = "Forcfield defining atom interactions", metavar = "")
+    parser.add_argument("-p", "--pivot_type", default = SystemParams.pivot_type, help = "Numerical type corresponding to a atoms around which the fracture nodes will be created", metavar = "")
+    parser.add_argument("-n", "--neighbors", default = SystemParams.neigh_num, help = "Number of nearest neighbors to the pivot atom, used to determine the midpoint of bonds between the pivot atom and its neighbors for fracture node creation", metavar = "")
     args = parser.parse_args()
 
     
@@ -91,16 +92,17 @@ def main():
     Data.structure_file = args.structure
     Data.potfile = args.force_field
 
-    tree = FracTree(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature)
-    tree.build(dtheta = args.angle, dr = args.radius, interactions = args.interactions)
-    print("Number of nodes created:", len(tree))
+    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
+    #tree.build(dtheta = args.angle, dr = args.radius, interactions = args.interactions)
+    graph.build_mid_atom(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+    print("Number of nodes created:", len(graph))
 
 
-    data_dir = "out_files" 
-    res = 0.69*tree.calculate(data_dir)
-    print("G:", res)
+    #data_dir = "out_files" 
+    #res = 0.69*tree.calculate(data_dir)
+    #print("G:", res)
 
-    visualize(tree, args.radius, args.angle)
+    visualize(graph, args.radius, args.angle)
 
 
 

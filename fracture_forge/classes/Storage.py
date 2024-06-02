@@ -10,10 +10,12 @@ class Data:
 
 class SystemParams:
     simulation_temp = 300
-    dr = 10
+    dr = 3
     error = 0.1
     interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
     dtheta = 30
+    pivot_type = 2
+    neigh_num = 2
 
 class Helper:
     action_proc = 0

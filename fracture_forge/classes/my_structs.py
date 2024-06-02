@@ -5,8 +5,9 @@ import numpy as np
 import ctypes as ct
 import regex as re
 
-class FracTree:
-    def __init__(self, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300):
+class FracGraph:
+    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
+        self.__dr = connection_radius
         self.__test_mode = test_mode
         self.__head = Node(is_head = True, test_mode = self.__test_mode)
         self.__grid_size = error/np.sqrt(2)
@@ -36,7 +37,7 @@ class FracTree:
         x_side = box[1][0] - box[0][0]
         start_pos = (x_side/2 + box[0][0], Data.old_bounds[0] - start_buffer)
         self.__head.set_tip(self.__discretize(start_pos))
-        self.__nodes_hash = {self.__head.get_pos() : self.__head}
+        self.__node_hash = {self.__discretize(self.__head.get_pos()) : self.__head}
 
     #Getters
     def get_box(self):
@@ -49,12 +50,56 @@ class FracTree:
         return self.__node_ctr
 
     def flatten(self):
-        return self.__nodes_hash.values()
+        return self.__node_hash.values()
+
+    def get_node_coords(self):
+        return np.array(list(self.__node_hash.keys()))
 
     #Main behavior
     def __discretize(self, coords):
         return (self.__grid_size*round(coords[0]/self.__grid_size), self.__grid_size*round(coords[1]/self.__grid_size))
         #return coords
+
+    def build_mid_atom(self, pivot_atom_type, num_neighs, interactions = "default"):
+        if interactions == "default":
+            Data.type_groups = 1
+        else:
+            Data.type_groups = max(sum(interactions, ()))
+
+        head_lmp = self.__head.get_lmp()
+
+        #Calculate simulation region sides
+        sides = np.array([self.__box[1][0] - self.__box[0][0], self.__box[1][1] - self.__box[0][1], self.__box[1][2] - self.__box[0][2]])
+
+
+        positions = np.array(head_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
+        types = np.array(head_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
+        ids = np.array(head_lmp.gather_atoms("id", 0, 1), dtype = ct.c_int)
+
+        self.__node_pos = np.array(list())
+
+        #Cycle through the local ids of atoms with the oxygen type
+        for pid in np.where(types == pivot_atom_type)[0]:
+            #Get the distance vector components
+            diff = positions - positions[pid]
+            #Enforce the periodic boundary condition
+            diff -= np.around(diff/sides)*sides
+            #Calculate the distance vector norm
+            distances = np.linalg.norm(diff, axis = 1)
+            #Mask out the unwanted neighbor candidates (oxygens)
+            distances = np.where(types == pivot_atom_type, float("inf"), distances)
+            #Get local ids of two closest oxygen neighbors
+            neigh_ids = np.where(np.isin(distances, np.partition(distances, num_neighs - 1)[:num_neighs]))[0]
+            #Calculate mid-bond position
+            mid_positions = positions[pid] + diff[neigh_ids]/2
+            #Enforce periodic boundaries
+            mid_positions += (mid_positions < self.__box[0])*sides
+            mid_positions -= (mid_positions > self.__box[1])*sides
+            for mid_pos in mid_positions:
+                self.attach(coords = mid_pos[:-1])
+
+
+
 
     def build(self, dtheta, dr, interactions = "default"):
         if interactions == "default":
@@ -154,16 +199,25 @@ class FracTree:
                 node.set_lowest_leaf(None)
             return lowest_pot
 
-    def attach(self, coords, node = None, angle = None):
-        if not node:
-            node = self.__head
-        if self.__discretize(coords) in self.__nodes_hash:
-            new_node = self.__nodes_hash[self.__discretize(coords)]
+    def attach(self, coords):
+        disc_coords = self.__discretize(coords)
+
+        if disc_coords in self.__node_hash:
+            new_node = self.__node_hash[disc_coords]
         else:
-            new_node = Node(tip = self.__discretize(coords), parent = node, angle = angle, node_ctr = self.__node_ctr)
+            new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr)
+            self.__node_hash[disc_coords] = new_node
             self.__node_ctr += 1
-            self.__nodes_hash[self.__discretize(coords)] = new_node
-        node.attach(new_node)
+
+        num_bins = int(np.floor(self.__dr/self.__grid_size))
+        for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2):
+            for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2):
+                if (x, y) != disc_coords and (x, y) in self.__node_hash:
+                    self.__node_hash[(x, y)].attach(new_node)
+                    new_node.attach(self.__node_hash[(x, y)])
+
+
+
         return new_node
 
     def __modify_potfile(self, interactions):
@@ -216,14 +270,12 @@ class FracTree:
         
 
 class Node:
-    def __init__(self, parent = None, is_head = False, tip = None, units = "real", angle = np.pi/2, test_mode = False, node_ctr = 0):
+    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0):
         self.__id = node_ctr
         self.__active = False
         self.__is_head = is_head
         self.__children = list()
         self.__tip = tip
-        self.__parent = parent
-        self.__theta = angle
         self.__surface_area = 0
 
         if self.__is_head:
@@ -240,6 +292,7 @@ class Node:
             else:
                 filename = glob.glob("glass_*.structure")[-1]
             self.__lmp.command(f"read_data {filename}")
+            self.__structure_file = filename
             if Data.potfile:
                 self.potfile = Data.potfile
             else:
@@ -272,6 +325,9 @@ class Node:
             return np.pi/2
 
     #Getters
+    def get_struct_filename(self):
+        return self.__structure_file
+
     def get_id(self):
         return self.__id
 
@@ -307,6 +363,12 @@ class Node:
         return self.__active
 
     #Main behavior
+    def __calc_angle(self):
+        if not self.__parent:
+            return np.pi/2
+        else:
+            pass
+
     def __system_parameters_initialization(self, units):
         self.__lmp.command(f"units {units}")
         SystemParams.units = units
@@ -325,7 +387,9 @@ class Node:
         self.__lmp.command("compute pe_pa all pe/atom")
 
 
-    def activate(self, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False):
+    def activate(self, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False, parent = None):
+        self.__parent = parent
+        self.__theta = self.__calc_angle()
         self.__active = True
         if self.__is_head:
             self.__lmp.command(f"include {self.potfile}")
@@ -378,20 +442,6 @@ class Node:
         if self.is_leaf():
             self.__lowest_leaf = self
             self.__path_pe = self.__lmp.get_thermo("pe")
-
-
-    def __fast_cut(self, my_atoms, types, natoms):
-        found = False
-        i = 0
-        while not found and i < natoms:
-            float_pos = my_atoms[i]
-            group = self.__near_surface(float_pos[:-1])
-            if group > 1:
-                found = True
-            else:
-                i += 1
-
-
 
 
     def __cut(self, my_atoms, types, natoms):

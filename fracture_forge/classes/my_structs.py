@@ -260,6 +260,12 @@ class Node:
         return self
 
     def set_parent(self, node):
+        node_pos = node.get_pos()
+        if node.is_head() or not (self.__tip[0] - node_pos[0]):
+            self.__theta = np.pi/2
+        else:
+            self.__theta = np.arctan((self.__tip[1] - node_pos[1])/(self.__tip[0] - node_pos[0]))
+            self.__theta = self.__theta if self.__theta >= 0 else np.pi + self.__theta
         self.__parent = node
 
     def set_lowest_leaf(self, node):

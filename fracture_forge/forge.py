@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def draw_arcs(nodes, plt, alpha, R):
+def draw_arcs(nodes, alpha, R):
     for node in nodes:
         if not node.is_leaf():
             circ_angles = np.linspace(alpha*np.pi/180, np.pi*(1 - alpha/180), 100)
@@ -15,7 +15,7 @@ def draw_arcs(nodes, plt, alpha, R):
             circ_y = point[1] + R*np.sin(circ_angles)
             plt.plot(circ_x, circ_y, color = "blue")
 
-def draw_lines(nodes, plt):
+def draw_lines(nodes):
     for node in nodes:
         parent_pos = node.get_pos()
         for child in node.get_neighbors():
@@ -30,6 +30,35 @@ def draw_lines(nodes, plt):
 
             plt.plot(line_x, line_y, color = "red")
 
+
+def color_paths(graph):
+    paths = graph.get_paths()
+    painted = list()
+    colors = []
+    for path in paths:
+        parent = path[0]
+        i = 1
+        num_nodes = len(path)
+        while i < num_nodes:
+            if node not in painted:
+                node = parent
+                parent = path[i]
+                node_pos = node.get_pos()
+                parent_pos = parent.get_pos()
+                if node_pos[0] - parent_pos[0]:
+                    tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
+                    line_x = np.linspace(parent_pos[0], node_pos[0], 100)
+                    line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
+                else:
+                    line_x = [node_pos[0], node_pos[0]]
+                    line_y = [parent_pos[1], node_pos[1]]
+
+                plt.plot(line_x, line_y, color = "red")
+                painted.append(node)
+            i += 1
+
+
+
 def visualize(graph, dr, dtheta):
     nodes = graph.flatten()
     points = np.array([node.get_pos() for node in nodes])
@@ -38,8 +67,9 @@ def visualize(graph, dr, dtheta):
     x = points[:, 0]
     y = points[:, 1]
 
-    #draw_arcs(nodes, plt, dtheta, dr)
-    draw_lines(nodes, plt)
+    #draw_arcs(nodes, dtheta, dr)
+    #draw_lines(nodes)
+    #color_paths(graph)
 
     box = graph.get_box()
     plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black")
@@ -47,7 +77,7 @@ def visualize(graph, dr, dtheta):
     plt.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], color = "black")
     plt.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], color = "black")
 
-    plt.plot(x, y, marker = 'o', linestyle = 'None', color = "green")
+    plt.plot(x, y, marker = 'o', linestyle = 'None', color = "black")
     plt.show()
 
 def parser_call():
@@ -96,8 +126,8 @@ def main():
     Data.non_inter_cutoff = args.width
 
     graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
-    #graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-    graph.build_test(interactions = args.interactions)
+    graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+    #graph.build_test(interactions = args.interactions)
     print("Number of nodes created:", len(graph))
 
 

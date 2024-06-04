@@ -81,6 +81,8 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
         self.__head.attach(self.__tail)
+        node = self.attach(coords = (30, 15))
+        self.__head.attach(node)
 
 
 
@@ -157,32 +159,52 @@ class FracGraph:
         starting_pe = self.__head.get_lmp().get_thermo("pe")
 
         energies = {node : float("inf") for node in self.flatten()}
-        energies[self.__head] = starting_pe
+        energies[self.__head] = 0
+        self.__paths = dict()
 
-        priority_queue = [(starting_pe, self.__head)]
+        priority_queue = [(0, self.__head, None)]
         scan_ctr = 0
         while priority_queue:
-            current_energy, current = heapq.heappop(priority_queue)
+            current_energy, current, parent_id = heapq.heappop(priority_queue)
+            #print("Popped node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
+            if parent_id != current.get_parent_id():
+                current.return2state(parent_id)
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
-            print("Looking at node:", current.get_id(), current_energy, current.get_pos())
 
             if current.is_tail():
                 self.__tail.reset_tip()
                 self.__head.reset_tip()
-                return (current_energy - starting_pe)/current.get_surface_area()
+                return current_energy/current.get_surface_area()
 
             neighbors = current.get_neighbors()
             for neighbor in neighbors:
                 if not neighbor.is_head() and neighbor != current.get_parent():
-                    path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile)
+                    path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile) - starting_pe
+                    #print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", current.get_pos())
                     if path_energy < energies[neighbor]:
                         energies[neighbor] = path_energy
-                        heapq.heappush(priority_queue, (path_energy, neighbor))
+                        self.__paths[neighbor] = current
+                        heapq.heappush(priority_queue, (path_energy, neighbor, current.get_id()))
 
         self.__tail.reset_tip()
         self.__head.reset_tip()
         return float("inf")
+
+    def __rec_path_search(self, node):
+        if node.is_head():
+            return [node]
+        else:
+            ancestors = self.__rec_path_search(self.__paths[node])
+            ancestors.insert(0, node)
+            return ancestors
+
+    def get_paths(self):
+        out = list()
+        for node in self.__paths.keys():
+            out.append(self.__rec_path_search(node))
+
+        return sorted(out, key = lambda node : node.get_pe())
 
 
     def attach(self, coords):
@@ -266,6 +288,7 @@ class Node:
         self.__surface_area = 0
         self.__test_mode = test_mode
         self.__old_tip = None
+        self.__versions = dict()
 
         if self.__is_head:
             if test_mode:
@@ -330,7 +353,7 @@ class Node:
                 self.__theta = np.pi/2
                 node.set_tip((self.__tip[0], node.get_pos()[1]))
 
-            print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
+            #print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
         self.__parent = node
 
 
@@ -341,11 +364,20 @@ class Node:
             return np.pi/2
 
     #Getters
+    def get_pe(self):
+        return self.__pe
+
     def get_struct_filename(self):
         return self.__structure_file
 
     def get_id(self):
         return self.__id
+
+    def get_parent_id(self):
+        if self.__is_head:
+            return None
+        else:
+            return self.__parent.__id
 
     def get_parent(self):
         return self.__parent
@@ -406,6 +438,30 @@ class Node:
         #Computes
         self.__lmp.command("compute pe_pa all pe/atom")
 
+    def return2state(self, parent_id):
+        if not self.is_head():
+            self.__lmp = self.__versions[parent_id]
+
+
+    def __save_state(self):
+        #print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
+        self.__versions[self.__parent.__id] = self.__lmp
+
+    def __reset(self):
+        neighs = self.__neighbors
+        theta = self.__theta
+        old_tip = self.__old_tip
+        parent = self.__parent
+        versions = self.__versions
+        self.__init__(is_head = self.__is_head, is_tail = self.__is_tail, node_ctr = self.__id, tip = self.__tip)
+        self.__neighbors = neighs
+        self.__theta = theta
+        self.__parent = parent
+        self.__old_tip = old_tip
+        self.__versions = versions
+
+
+
 
     def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, test_mode = False):
         if self.__is_head:
@@ -413,17 +469,11 @@ class Node:
                 self.__lmp.command(f"include {self.potfile}")
                 print("Head node activated")
         else:
+            if self.__active:
+                self.__save_state()
             self.set_parent(parent)
             if self.__active:
-                neighs = self.__neighbors
-                theta = self.__theta
-                old_tip = self.__old_tip
-                parent = self.__parent
-                self.__init__(is_head = self.__is_head, is_tail = self.__is_tail, node_ctr = self.__id, tip = self.__tip)
-                self.__neighbors = neighs
-                self.__theta = theta
-                self.__parent = parent
-                self.__old_tip = old_tip
+                self.__reset()
 
             old_lmp = self.__parent.get_lmp()
             if test_mode:
@@ -459,13 +509,14 @@ class Node:
             self.box_side = box[1][0] - box[0][0]
 
             self.__cut(my_atoms, types, old_lmp.get_natoms())
-            print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
+            #print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
             
 
             self.potfile = potfile
         self.__lmp.command("run 0")
         self.__active = True
-        return self.__lmp.get_thermo("pe")
+        self.__pe = self.__lmp.get_thermo("pe")
+        return self.__pe
 
 
     def __cut(self, my_atoms, types, natoms):

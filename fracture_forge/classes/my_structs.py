@@ -4,14 +4,17 @@ import glob, os
 import numpy as np
 import ctypes as ct
 import regex as re
+import heapq
 
 class FracGraph:
     def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
         self.__dr = connection_radius
         self.__test_mode = test_mode
         self.__head = Node(is_head = True, test_mode = self.__test_mode)
+        self.__head.set_parent(None)
+        self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1)
+        self.__node_ctr = 2
         self.__grid_size = error/np.sqrt(2)
-        self.__node_ctr = 1
         head_lmp = self.__head.get_lmp()
 
         """Surface creation"""
@@ -36,8 +39,9 @@ class FracGraph:
         self.__box = box
         x_side = box[1][0] - box[0][0]
         start_pos = (x_side/2 + box[0][0], Data.old_bounds[0] - start_buffer)
-        self.__head.set_tip(self.__discretize(start_pos))
-        self.__node_hash = {self.__discretize(self.__head.get_pos()) : self.__head}
+        self.__head.set_tip(start_pos)
+        self.__tail.set_tip((x_side/2 + box[0][0], Data.old_bounds[1] + start_buffer))
+        self.__node_hash = {self.__head.get_pos() : self.__head, self.__tail.get_pos() : self.__tail}
 
     #Getters
     def get_box(self):
@@ -54,29 +58,55 @@ class FracGraph:
 
     def get_node_coords(self):
         return np.array(list(self.__node_hash.keys()))
+        #return np.array([neigh.get_pos() for neigh in self.__tail.get_neighbors()])
+
+    def __trunc(self, values, dec = 0):
+        return np.trunc(np.array(values)*(10**dec))/(10**dec)
 
     #Main behavior
     def __discretize(self, coords):
-        return (self.__grid_size*round(coords[0]/self.__grid_size), self.__grid_size*round(coords[1]/self.__grid_size))
-        #return coords
+        rel_coords = np.array(coords) - self.__box[0][:-1]
+        grid_coords = self.__grid_size*np.around(rel_coords/self.__grid_size) + self.__box[0][:-1]
+        grid_coords -= (grid_coords > self.__box[1][:-1])*self.__grid_size
+        #return tuple(self.__trunc(grid_coords, 3))
+        return tuple(grid_coords)
 
-    def build_mid_atom(self, pivot_atom_type, num_neighs, interactions = "default"):
+    def build_test(self, interactions):
         if interactions == "default":
             Data.type_groups = 1
         else:
             Data.type_groups = max(sum(interactions, ()))
 
+
+        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
+        self.__modify_potfile(interactions)
+        self.__head.attach(self.__tail)
+
+
+
+    def build(self, pivot_atom_type, num_neighs, interactions = "default"):
+        if interactions == "default":
+            Data.type_groups = 1
+        else:
+            Data.type_groups = max(sum(interactions, ()))
+
+
+        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
+        self.__modify_potfile(interactions)
         head_lmp = self.__head.get_lmp()
 
         #Calculate simulation region sides
         sides = np.array([self.__box[1][0] - self.__box[0][0], self.__box[1][1] - self.__box[0][1], self.__box[1][2] - self.__box[0][2]])
 
+        head_divs = int(np.ceil(sides[0]/self.__dr))
+        head_step = sides[0]/head_divs
+        head_nodes = dict()
+        tail_nodes = dict()
 
+        #Gather per-atom information
         positions = np.array(head_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
         types = np.array(head_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
         ids = np.array(head_lmp.gather_atoms("id", 0, 1), dtype = ct.c_int)
-
-        self.__node_pos = np.array(list())
 
         #Cycle through the local ids of atoms with the oxygen type
         for pid in np.where(types == pivot_atom_type)[0]:
@@ -96,48 +126,25 @@ class FracGraph:
             mid_positions += (mid_positions < self.__box[0])*sides
             mid_positions -= (mid_positions > self.__box[1])*sides
             for mid_pos in mid_positions:
-                self.attach(coords = mid_pos[:-1])
+                node = self.attach(coords = mid_pos[:-1])
+                node_pos = int(np.floor((mid_pos[0] - self.__box[0][0])/head_step))
+                if node_pos in head_nodes:
+                    if mid_pos[1] < head_nodes[node_pos].get_pos()[1]:
+                        head_nodes[node_pos] = node
+                else:
+                    head_nodes[node_pos] = node
 
+                if node_pos in tail_nodes:
+                    if mid_pos[1] > tail_nodes[node_pos].get_pos()[1]:
+                        tail_nodes[node_pos] = node
+                else:
+                    tail_nodes[node_pos] = node
 
+        for head_neigh in head_nodes.values():
+            self.__head.attach(head_neigh)
 
-
-    def build(self, dtheta, dr, interactions = "default"):
-        if interactions == "default":
-            Data.type_groups = 1
-        else:
-            Data.type_groups = max(sum(interactions, ()))
-        x_side = self.__box[1][0] - self.__box[0][0]
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        self.__modify_potfile(interactions)
-        self.__dr = dr
-        #Check so that surface regions don't overlap through a periodix x boundary
-        if dtheta*(np.pi/180) < np.arcsin(2*Data.non_inter_cutoff/x_side):
-            self.__angle_span = (2*dtheta*(np.pi/180), np.pi - 2*dtheta*(np.pi/180), int(180/dtheta) - 3)
-        else:
-            self.__angle_span = (dtheta*(np.pi/180), np.pi - dtheta*(np.pi/180), int(180/dtheta) - 1)
-
-        
-        self.__generate_nodes(coords = self.__head.get_pos())
-
-    def __generate_nodes(self, coords, parent = None, theta = None, in_glass = False):
-        if not in_glass and coords[1] >= Data.old_bounds[0]:
-            in_glass = True
-
-        if in_glass:
-            if coords[0] >= self.__box[1][0] or coords[0] <= self.__box[0][0]:
-                return
-            parent = self.attach(coords, node = parent, angle = theta)
-
-
-        if coords[1] >= Data.old_bounds[1]:
-            return
-
-        if theta:
-            for theta in np.linspace(*self.__angle_span):
-                self.__generate_nodes(coords = (coords[0] + self.__dr*np.cos(theta), coords[1] + self.__dr*np.sin(theta)), parent = parent, theta = theta, in_glass = in_glass)
-        else:
-            for x in np.linspace(self.__box[0][0] + self.__dr*0.2, self.__box[1][0] - self.__dr*0.2, int((self.__box[1][0] - self.__box[0][0] - self.__dr*0.4)/self.__dr)):
-                self.__generate_nodes(coords = (x, self.__box[0][1] + self.__dr*0.2), parent = parent, theta = np.pi/2, in_glass = in_glass)
+        for tail_neigh in tail_nodes.values():
+            self.__tail.attach(tail_neigh)
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         if os.path.isdir(save_dir):
@@ -145,59 +152,38 @@ class FracGraph:
         os.mkdir(save_dir)
 
         self.__outp_freq = outp_freq
-        self.__lowest_path_energy = float("inf")
         self.__save_dir = save_dir
         self.__head.activate()
         starting_pe = self.__head.get_lmp().get_thermo("pe")
 
-        lowest_pe = self.__calc_subtree(self.__head)
+        energies = {node : float("inf") for node in self.flatten()}
+        energies[self.__head] = starting_pe
 
-        lowest_leaf = self.__head.get_lowest_leaf()
-        lowest_leaf.get_lmp().command("write_data result.structure")
-        try:
-            res = (lowest_pe - starting_pe)/lowest_leaf.get_surface_area()
-        except:
-            res = 0
+        priority_queue = [(starting_pe, self.__head)]
+        scan_ctr = 0
+        while priority_queue:
+            current_energy, current = heapq.heappop(priority_queue)
+            current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
+            scan_ctr += 1
+            print("Looking at node:", current.get_id(), current_energy, current.get_pos())
 
-        return res
+            if current.is_tail():
+                self.__tail.reset_tip()
+                self.__head.reset_tip()
+                return (current_energy - starting_pe)/current.get_surface_area()
 
-    def __calc_subtree(self, node):
-        if node.is_leaf():
-            pe = node.get_path_pe()
-            if pe < self.__lowest_path_energy:
-                self.__lowest_path_energy = pe
-            return pe
-        else:
-            lowest_pot = float("inf")
-            to_terminate = list()
-            children = node.get_children()
-            lowest_child = None
-            for child in children:
-                if not child.is_active():
-                    child.set_parent(node)
-                    child.activate(dr = self.__dr, potfile = self.__new_potfile, test_mode = self.__test_mode)
-                    if not child.get_id()%self.__outp_freq:
-                        child.get_lmp().command(f"write_data {self.__save_dir}/output.{child.get_id()}.structure")
-                    if child.get_lmp().get_thermo("pe") > self.__lowest_path_energy:
-                        res_pe = float("inf")
-                        child.set_path_pe(res_pe)
-                    else:
-                        res_pe = self.__calc_subtree(child)
-                else:
-                    res_pe = child.get_path_pe()
-                if res_pe < lowest_pot:
-                    lowest_pot = res_pe
-                    lowest_child = child
+            neighbors = current.get_neighbors()
+            for neighbor in neighbors:
+                if not neighbor.is_head() and neighbor != current.get_parent():
+                    path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile)
+                    if path_energy < energies[neighbor]:
+                        energies[neighbor] = path_energy
+                        heapq.heappush(priority_queue, (path_energy, neighbor))
 
-            for child in children:
-                if child is not lowest_child:
-                    child.get_lmp().close()
-            node.set_path_pe(lowest_pot)
-            if lowest_child:
-                node.set_lowest_leaf(lowest_child.get_lowest_leaf())
-            else:
-                node.set_lowest_leaf(None)
-            return lowest_pot
+        self.__tail.reset_tip()
+        self.__head.reset_tip()
+        return float("inf")
+
 
     def attach(self, coords):
         disc_coords = self.__discretize(coords)
@@ -210,11 +196,11 @@ class FracGraph:
             self.__node_ctr += 1
 
         num_bins = int(np.floor(self.__dr/self.__grid_size))
-        for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2):
-            for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2):
-                if (x, y) != disc_coords and (x, y) in self.__node_hash:
-                    self.__node_hash[(x, y)].attach(new_node)
-                    new_node.attach(self.__node_hash[(x, y)])
+        for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1):
+            for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
+                neigh_coords = self.__discretize((x, y))
+                if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
+                    new_node.attach(self.__node_hash[neigh_coords])
 
 
 
@@ -270,13 +256,16 @@ class FracGraph:
         
 
 class Node:
-    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0):
+    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False):
         self.__id = node_ctr
         self.__active = False
         self.__is_head = is_head
-        self.__children = list()
+        self.__is_tail = is_tail
+        self.__neighbors = set()
         self.__tip = tip
         self.__surface_area = 0
+        self.__test_mode = test_mode
+        self.__old_tip = None
 
         if self.__is_head:
             if test_mode:
@@ -301,25 +290,52 @@ class Node:
             
 
     #Setters
-    def set_path_pe(self, pe):
-        self.__path_pe = pe
-
     def set_tip(self, coords):
-        if self.__is_head:
+        if self.__is_head or self.__is_tail:
             self.__tip = coords
+        if not self.__old_tip and (self.__is_tail or self.__is_head):
+            self.__old_tip = coords
+
+    def reset_tip(self):
+        if self.__is_tail or self.__is_head:
+            self.__tip = self.__old_tip
 
     def attach(self, node):
-        self.__children.append(node)
+        self.__neighbors.add(node)
+        node.__neighbors.add(self)
         return self
 
     def set_parent(self, node):
+        if node:
+            node_pos = node.get_pos()
+            if not (self.__tip[0] - node_pos[0]):
+                if self.__tip[1] > node_pos[1]:
+                    self.__theta = np.pi/2
+                else:
+                    self.__theta = -np.pi/2
+            else:
+                x = self.__tip[0] - node_pos[0]
+                if x > 0:
+                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x)
+                else:
+                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x) + np.pi
+
+
+            if self.is_tail():
+                self.__theta = np.pi/2
+                par_pos = node.get_pos()
+                self.set_tip((par_pos[0], self.get_pos()[1]))
+
+            if node.is_head():
+                self.__theta = np.pi/2
+                node.set_tip((self.__tip[0], node.get_pos()[1]))
+
+            print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
         self.__parent = node
 
-    def set_lowest_leaf(self, node):
-        self.__lowest_leaf = node
 
     def get_parent_angle(self):
-        if self.__parent:
+        if self.__parent and not self.__parent.is_head():
             return self.__parent.__theta
         else:
             return np.pi/2
@@ -337,8 +353,8 @@ class Node:
     def get_surface_area(self):
         return self.__surface_area
 
-    def get_children(self):
-        return self.__children
+    def get_neighbors(self):
+        return list(self.__neighbors)
 
     def get_pos(self):
         return self.__tip
@@ -356,19 +372,23 @@ class Node:
     def is_head(self):
         return self.__is_head
 
-    def is_leaf(self):
-        return not len(self.__children)
+    def is_tail(self):
+        return self.__is_tail
 
     def is_active(self):
         return self.__active
 
-    #Main behavior
-    def __calc_angle(self):
-        if not self.__parent:
-            return np.pi/2
-        else:
-            pass
+    #Built-in reassignment
+    def __str__(self):
+        return f"id: {self.__id}, position: {self.get_pos()}"
 
+    def __repr__(self):
+        return f"{self.__id}"
+
+    def __lt__(self, node):
+        return self.__id < node.__id
+
+    #Main behavior
     def __system_parameters_initialization(self, units):
         self.__lmp.command(f"units {units}")
         SystemParams.units = units
@@ -387,14 +407,23 @@ class Node:
         self.__lmp.command("compute pe_pa all pe/atom")
 
 
-    def activate(self, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, dr = None, test_mode = False, parent = None):
-        self.__parent = parent
-        self.__theta = self.__calc_angle()
-        self.__active = True
+    def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, test_mode = False):
         if self.__is_head:
-            self.__lmp.command(f"include {self.potfile}")
-            print("Head node activated")
+            if not self.__active:
+                self.__lmp.command(f"include {self.potfile}")
+                print("Head node activated")
         else:
+            self.set_parent(parent)
+            if self.__active:
+                neighs = self.__neighbors
+                theta = self.__theta
+                old_tip = self.__old_tip
+                parent = self.__parent
+                self.__init__(is_head = self.__is_head, is_tail = self.__is_tail, node_ctr = self.__id, tip = self.__tip)
+                self.__neighbors = neighs
+                self.__theta = theta
+                self.__parent = parent
+                self.__old_tip = old_tip
 
             old_lmp = self.__parent.get_lmp()
             if test_mode:
@@ -403,24 +432,21 @@ class Node:
                 self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
 
             self.__system_parameters_initialization(units = units)
-            self.dr = dr
             self.__prev_theta = self.get_parent_angle()
 
             self.__system_parameters_initialization(units = units)
             self.__lmp.command(f"timestep {timestep}")
             box = old_lmp.extract_box()
 
-            if self.__tip[0] > box[1][0]:
-                dist = dr - (self.__tip[0] - box[1][0])/np.cos(self.__theta)
-            elif self.__tip[0] < box[0][0]:
-                dist = dr - (box[0][0] - self.__tip[0])/np.sin(np.pi - self.__theta)
-            elif self.__tip[1] > Data.old_bounds[1]:
-                dist = dr - (self.__tip[1] - Data.old_bounds[1])/np.sin(self.__theta)
-            elif self.__tip[1] - dr*np.sin(self.__theta) < Data.old_bounds[0]:
-                dist = (self.__tip[1] - Data.old_bounds[0])/np.sin(self.__theta)
+            par_pos = self.__parent.get_pos()
+            if self.__parent.is_head():
+                y_dist = self.__tip[1] - Data.old_bounds[0]
+            elif self.__parent.is_tail():
+                y_dist = Data.old_bounds[1] - self.__tip[1]
             else:
-                dist = dr
+                y_dist = self.__tip[1] - par_pos[1]
 
+            dist = np.sqrt((self.__tip[0] - par_pos[0])**2 + y_dist**2)
             self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
 
             self.__lmp.command(f"region my_simbox block {box[0][0]} {box[1][0]} {box[0][1]} {box[1][1]} {box[0][2]} {box[1][2]}")
@@ -429,53 +455,55 @@ class Node:
             self.__lmp.command(f"include {potfile}")
 
             my_atoms = np.array(old_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
-            types = np.array(old_lmp.gather_atoms("type", 0, 1), dtype = ct.c_double)
+            types = np.array(old_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
             self.box_side = box[1][0] - box[0][0]
 
             self.__cut(my_atoms, types, old_lmp.get_natoms())
             print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
             
 
+            self.potfile = potfile
         self.__lmp.command("run 0")
-        self.potfile = potfile
-
-        if self.is_leaf():
-            self.__lowest_leaf = self
-            self.__path_pe = self.__lmp.get_thermo("pe")
+        self.__active = True
+        return self.__lmp.get_thermo("pe")
 
 
     def __cut(self, my_atoms, types, natoms):
+        prev_node = self.__parent.get_pos()
         for i in range(natoms):
             float_pos = my_atoms[i]
+            group = self.__near_surface(float_pos[:-1], prev_node = prev_node)
             if types[i] <= Data.initial_types:
-                group = self.__near_surface(float_pos[:-1])
                 if group <= Data.type_groups:
-                    new_type = int(types[i]) + (group - 1)*Data.initial_types
+                    new_type = types[i] + (group - 1)*Data.initial_types
                 else:
-                    new_type = int(types[i])
+                    new_type = types[i]
             elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
-                new_type = int(types[i])
-            else:
-                group = self.__near_surface(float_pos[:-1])
-                if group <= Data.type_groups:
-                    tp = int(types[i])%Data.initial_types
+                if self.__theta > self.__prev_theta and group == 3 or self.__theta < self.__prev_theta and group == 2:
+                    tp = types[i]%Data.initial_types
                     tp = tp if tp else tp + Data.initial_types
                     new_type = tp + (group - 1)*Data.initial_types
                 else:
-                    new_type = int(types[i])
+                    new_type = types[i]
+            else:
+                if group <= Data.type_groups:
+                    tp = types[i]%Data.initial_types
+                    tp = tp if tp else tp + Data.initial_types
+                    new_type = tp + (group - 1)*Data.initial_types
+                else:
+                    new_type = types[i]
 
             position = " ".join(map(str, float_pos))
             self.__lmp.command(f"create_atoms {new_type} single {position}")
 
 
 
-    def __near_surface(self, atom_pos):
+    def __near_surface(self, atom_pos, prev_node):
         cutoff = Data.non_inter_cutoff
         x0, y0 = self.__tip #Tip of the division vector
 
         #Tail of the division vector
-        x1 = x0 - self.dr*np.cos(self.__theta)
-        y1 = y0 - self.dr*np.sin(self.__theta)
+        x1, y1 = prev_node
 
         #Tail of the parallel transport of the division vector to the left by length 'cutoff'
         x2 = x1 - cutoff*np.sin(self.__theta)
@@ -504,14 +532,40 @@ class Node:
         f99 = np.poly1d([np.tan(self.__prev_theta + np.pi/2), y1 - x1*np.tan(self.__prev_theta + np.pi/2)])
 
         for x in [atom_pos[0], self.box_side + atom_pos[0], atom_pos[0] - self.box_side]:
-        #Tail of the cut coverage at turns
-            if (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < cutoff) and (atom_pos[1] < np.polyval(f12, x)) and (atom_pos[1] > np.polyval(f99, x)):
-                if (self.__prev_theta > self.__theta):
-                    return 2
-                elif (self.__prev_theta < self.__theta):
-                    return 3
+        #for x in [atom_pos[0]]:
 
-            if self.__theta <= np.pi/2:
+            # -90
+            if self.__theta == -np.pi/2:
+                if (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x > x1 and x <= x2):
+                    return 2
+                elif (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x <= x1 and x >= x3):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x >= x1):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x < x1):
+                    return 5
+            # (-90, 0)
+            elif self.__theta > -np.pi/2 and self.__theta < 0:
+                if (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] <= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f01, x)):
+                    return 2
+                elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f21, x)):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f31, x)):
+                    return 5
+            # 0
+            elif self.__theta == 0:
+                if (atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f01, x) and x >= x1 and x <= x0):
+                    return 2
+                elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f31, x) and x >= x1 and x <= x0):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and x >= x0):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and x >= x0):
+                    return 5
+            # (0, 90)
+            elif self.__theta > 0 and self.__theta < np.pi/2:
                 if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f01, x)):
                     return 2
                 elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)):
@@ -520,7 +574,19 @@ class Node:
                     return 4
                 elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
                     return 5
-            else:
+            # 90
+            elif self.__theta == np.pi/2:
+                if (atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f02, x) and x <= x1 and x > x2):
+                    return 2
+                elif (atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f02, x) and x > x1 and x < x3):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f02, x) and x <= x0):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f02, x) and x >= x0):
+                    return 5
+
+            # (90, 180)
+            elif self.__theta > np.pi/2 and self.__theta < np.pi:
                 if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f01, x)):
                     return 2
                 elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f31, x)):
@@ -529,6 +595,45 @@ class Node:
                     return 4
                 elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
                     return 5
+            # 180
+            elif self.__theta == np.pi:
+                if (atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] <= np.polyval(f01, x) and x <= x1 and x >= x0):
+                    return 2
+                elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f31, x) and x <= x1 and x >= x0):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and x <= x0):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and x <= x0):
+                    return 5
+            # (180, 270)
+            elif self.__theta > np.pi and self.__theta < 3*np.pi/2:
+                if (atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x)):
+                    return 2
+                elif (atom_pos[1] <= np.polyval(f31, x) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x)):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x)):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x)):
+                    return 5
+            # 270
+            elif self.__theta == 3*np.pi/2:
+                if (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x < x1 and x >= x3):
+                    return 2
+                elif (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x > x1 and x <= x2):
+                    return 3
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x >= x1):
+                    return 4
+                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x < x1):
+                    return 5
+
+            #Tail of the cut coverage at turns
+            if (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < cutoff) and (self.__theta - self.__prev_theta != np.pi) and (self.__prev_theta - self.__theta != np.pi):
+                if (self.__prev_theta > self.__theta and self.__theta > self.__prev_theta - np.pi) or (self.__prev_theta < self.__theta and self.__theta > np.pi + self.__prev_theta):
+                    return 2
+                elif (self.__prev_theta < self.__theta and self.__theta < np.pi + self.__prev_theta) or (self.__prev_theta > self.__theta and self.__theta < self.__prev_theta - np.pi):
+                    return 3
+
+
 
         return 1
         

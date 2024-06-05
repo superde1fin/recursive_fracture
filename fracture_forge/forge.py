@@ -33,28 +33,33 @@ def draw_lines(nodes):
 
 def color_paths(graph):
     paths = graph.get_paths()
-    painted = list()
-    colors = []
-    for path in paths:
+    num_paths = len(paths)
+    for npi, path in enumerate(paths):
         parent = path[0]
         i = 1
         num_nodes = len(path)
         while i < num_nodes:
-            if node not in painted:
-                node = parent
-                parent = path[i]
-                node_pos = node.get_pos()
-                parent_pos = parent.get_pos()
-                if node_pos[0] - parent_pos[0]:
-                    tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
-                    line_x = np.linspace(parent_pos[0], node_pos[0], 100)
-                    line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
-                else:
-                    line_x = [node_pos[0], node_pos[0]]
-                    line_y = [parent_pos[1], node_pos[1]]
+            node = parent
+            parent = path[i]
+            node_pos = node.get_pos()
+            parent_pos = parent.get_pos()
+            if parent.is_head():
+                parent_pos = (node_pos[0], parent_pos[1])
+            if node.is_tail():
+                node_pos = (parent_pos[0], node_pos[1])
+            if node_pos[0] - parent_pos[0]:
+                tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
+                line_x = np.linspace(parent_pos[0], node_pos[0], 100)
+                line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
+            else:
+                line_x = [node_pos[0], node_pos[0]]
+                line_y = [parent_pos[1], node_pos[1]]
 
-                plt.plot(line_x, line_y, color = "red")
-                painted.append(node)
+            if num_paths - 1:
+                plt.plot(line_x, line_y, color = (npi/(num_paths - 1), 1 - npi/(num_paths - 1) , 0))
+            else:
+                plt.plot(line_x, line_y, color = (0, 1, 0))
+            
             i += 1
 
 
@@ -69,15 +74,18 @@ def visualize(graph, dr, dtheta):
 
     #draw_arcs(nodes, dtheta, dr)
     #draw_lines(nodes)
-    #color_paths(graph)
+    color_paths(graph)
 
     box = graph.get_box()
-    plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black")
-    plt.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], color = "black")
-    plt.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], color = "black")
-    plt.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], color = "black")
+    plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black", alpha = 0.1)
+    plt.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], color = "black", alpha = 0.1)
+    plt.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], color = "black", alpha = 0.1)
+    plt.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], color = "black", alpha = 0.1)
 
-    plt.plot(x, y, marker = 'o', linestyle = 'None', color = "black")
+    #plt.plot(x, y, marker = 'o', linestyle = 'None', color = "black")
+    ax = plt.gca()
+    ax.set_aspect("equal", adjustable = "box")
+    plt.savefig("energy_landscape.png")
     plt.show()
 
 def parser_call():

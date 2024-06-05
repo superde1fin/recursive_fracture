@@ -14,7 +14,11 @@ class FracGraph:
         self.__head.set_parent(None)
         self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1)
         self.__node_ctr = 2
+        self.__paths = dict()
         self.__grid_size = error/np.sqrt(2)
+        if self.__dr < self.__grid_size:
+            self.__dr = self.__grid_size*1.5
+            print("Reset probe radius to allow for fracture graph connectivity")
         head_lmp = self.__head.get_lmp()
 
         """Surface creation"""
@@ -68,7 +72,7 @@ class FracGraph:
         rel_coords = np.array(coords) - self.__box[0][:-1]
         grid_coords = self.__grid_size*np.around(rel_coords/self.__grid_size) + self.__box[0][:-1]
         grid_coords -= (grid_coords > self.__box[1][:-1])*self.__grid_size
-        #return tuple(self.__trunc(grid_coords, 3))
+        return tuple(self.__trunc(grid_coords, 3))
         return tuple(grid_coords)
 
     def build_test(self, interactions):
@@ -81,8 +85,14 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
         self.__head.attach(self.__tail)
+        """
         node = self.attach(coords = (30, 15))
         self.__head.attach(node)
+        node1 = self.attach(coords = (27, 20))
+        node.attach(node1)
+        node2 = self.attach(coords = (33, 20))
+        node.attach(node2)
+        """
 
 
 
@@ -129,15 +139,16 @@ class FracGraph:
             mid_positions -= (mid_positions > self.__box[1])*sides
             for mid_pos in mid_positions:
                 node = self.attach(coords = mid_pos[:-1])
-                node_pos = int(np.floor((mid_pos[0] - self.__box[0][0])/head_step))
+                disc_coords = node.get_pos()
+                node_pos = int(np.floor((disc_coords[0] - self.__box[0][0])/head_step))
                 if node_pos in head_nodes:
-                    if mid_pos[1] < head_nodes[node_pos].get_pos()[1]:
+                    if disc_coords[1] < head_nodes[node_pos].get_pos()[1]:
                         head_nodes[node_pos] = node
                 else:
                     head_nodes[node_pos] = node
 
                 if node_pos in tail_nodes:
-                    if mid_pos[1] > tail_nodes[node_pos].get_pos()[1]:
+                    if disc_coords[1] > tail_nodes[node_pos].get_pos()[1]:
                         tail_nodes[node_pos] = node
                 else:
                     tail_nodes[node_pos] = node
@@ -160,14 +171,18 @@ class FracGraph:
 
         energies = {node : float("inf") for node in self.flatten()}
         energies[self.__head] = 0
-        self.__paths = dict()
 
         priority_queue = [(0, self.__head, None)]
         scan_ctr = 0
         while priority_queue:
             current_energy, current, parent_id = heapq.heappop(priority_queue)
-            #print("Popped node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
+
+            if current_energy > energies[current]:
+                continue
+
+            print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
             if parent_id != current.get_parent_id():
+                #print("Mismatch! Correct par_id:", parent_id, "actual par_id:", current.get_parent_id())
                 current.return2state(parent_id)
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
@@ -179,13 +194,14 @@ class FracGraph:
 
             neighbors = current.get_neighbors()
             for neighbor in neighbors:
-                if not neighbor.is_head() and neighbor != current.get_parent():
+                if not neighbor.is_head() and neighbor.get_id() != parent_id:
                     path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile) - starting_pe
-                    #print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", current.get_pos())
+                    #print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
                     if path_energy < energies[neighbor]:
-                        energies[neighbor] = path_energy
                         self.__paths[neighbor] = current
+                        energies[neighbor] = path_energy
                         heapq.heappush(priority_queue, (path_energy, neighbor, current.get_id()))
+
 
         self.__tail.reset_tip()
         self.__head.reset_tip()
@@ -202,9 +218,10 @@ class FracGraph:
     def get_paths(self):
         out = list()
         for node in self.__paths.keys():
-            out.append(self.__rec_path_search(node))
+            if node not in self.__paths.values():
+                out.append(self.__rec_path_search(node))
 
-        return sorted(out, key = lambda node : node.get_pe())
+        return sorted(out, key = lambda node_lst : len(node_lst), reverse = True)
 
 
     def attach(self, coords):
@@ -440,12 +457,12 @@ class Node:
 
     def return2state(self, parent_id):
         if not self.is_head():
-            self.__lmp = self.__versions[parent_id]
+            self.__lmp, self.__surface_area = self.__versions[parent_id]
 
 
     def __save_state(self):
         #print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
-        self.__versions[self.__parent.__id] = self.__lmp
+        self.__versions[self.__parent.__id] = (self.__lmp, self.__surface_area)
 
     def __reset(self):
         neighs = self.__neighbors
@@ -489,12 +506,11 @@ class Node:
             box = old_lmp.extract_box()
 
             par_pos = self.__parent.get_pos()
+            y_dist = self.__tip[1] - par_pos[1]
             if self.__parent.is_head():
-                y_dist = self.__tip[1] - Data.old_bounds[0]
-            elif self.__parent.is_tail():
-                y_dist = Data.old_bounds[1] - self.__tip[1]
-            else:
-                y_dist = self.__tip[1] - par_pos[1]
+                y_dist -= (Data.old_bounds[0] - par_pos[1])
+            if self.__is_tail:
+                y_dist -= (self.__tip[1] - Data.old_bounds[1])
 
             dist = np.sqrt((self.__tip[0] - par_pos[0])**2 + y_dist**2)
             self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])

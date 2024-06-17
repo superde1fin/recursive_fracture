@@ -20,10 +20,15 @@ class SystemParams:
 class Helper:
     action_proc = 0
     @staticmethod
-    def print(*args):
+    def mpi_print(*args):
         if MPI.COMM_WORLD.Get_rank() == Helper.action_proc:
             print(*args)
             sys.stdout.flush()
+
+    @staticmethod
+    def print(*args):
+        print(*args)
+        sys.stdout.flush()
 
     @staticmethod
     def command(*args):

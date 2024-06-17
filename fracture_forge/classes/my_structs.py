@@ -18,7 +18,7 @@ class FracGraph:
         self.__grid_size = error/np.sqrt(2)
         if self.__dr < self.__grid_size:
             self.__dr = self.__grid_size*1.5
-            print("Reset probe radius to allow for fracture graph connectivity")
+            Helper.print("Reset probe radius to allow for fracture graph connectivity")
         head_lmp = self.__head.get_lmp()
 
         """Surface creation"""
@@ -102,6 +102,8 @@ class FracGraph:
         else:
             Data.type_groups = max(sum(interactions, ()))
 
+        Helper.print(Data.type_groups)
+
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
@@ -180,9 +182,9 @@ class FracGraph:
             if current_energy > energies[current]:
                 continue
 
-            print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
+            Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
             if parent_id != current.get_parent_id():
-                #print("Mismatch! Correct par_id:", parent_id, "actual par_id:", current.get_parent_id())
+                #Helper.print("Mismatch! Correct par_id:", parent_id, "actual par_id:", current.get_parent_id())
                 current.return2state(parent_id)
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
@@ -195,12 +197,13 @@ class FracGraph:
             neighbors = current.get_neighbors()
             for neighbor in neighbors:
                 if not neighbor.is_head() and neighbor.get_id() != parent_id:
-                    path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile) - starting_pe
-                    #print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
+                    path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile, test_mode = self.__test_mode) - starting_pe
+                    #Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
                     if path_energy < energies[neighbor]:
                         self.__paths[neighbor] = current
                         energies[neighbor] = path_energy
                         heapq.heappush(priority_queue, (path_energy, neighbor, current.get_id()))
+            current.deactivate()
 
 
         self.__tail.reset_tip()
@@ -232,6 +235,7 @@ class FracGraph:
         else:
             new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr)
             self.__node_hash[disc_coords] = new_node
+            Helper.print("Created a new node", self.__node_ctr)
             self.__node_ctr += 1
 
         num_bins = int(np.floor(self.__dr/self.__grid_size))
@@ -370,7 +374,7 @@ class Node:
                 self.__theta = np.pi/2
                 node.set_tip((self.__tip[0], node.get_pos()[1]))
 
-            #print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
+            #Helper.print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
         self.__parent = node
 
 
@@ -379,6 +383,11 @@ class Node:
             return self.__parent.__theta
         else:
             return np.pi/2
+
+    def deactivate(self):
+        if self.__active:
+            self.__active = False
+            self.__lmp.close()
 
     #Getters
     def get_pe(self):
@@ -457,11 +466,16 @@ class Node:
 
     def return2state(self, parent_id):
         if not self.is_head():
-            self.__lmp, self.__surface_area = self.__versions[parent_id]
+            self.__lmp.close()
+            for pid in self.__versions.keys():
+                if pid == parent_id:
+                    self.__lmp, self.__surface_area = self.__versions[parent_id]
+                else:
+                    self.__versions[pid][0].close()
 
 
     def __save_state(self):
-        #print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
+        #Helper.print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
         self.__versions[self.__parent.__id] = (self.__lmp, self.__surface_area)
 
     def __reset(self):
@@ -480,11 +494,11 @@ class Node:
 
 
 
-    def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, test_mode = False):
+    def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000):
         if self.__is_head:
             if not self.__active:
                 self.__lmp.command(f"include {self.potfile}")
-                print("Head node activated")
+                Helper.print("Head node activated")
         else:
             if self.__active:
                 self.__save_state()
@@ -494,7 +508,7 @@ class Node:
 
             old_lmp = self.__parent.get_lmp()
             if test_mode:
-                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{self.__id}.lammps"])
+                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{self.__id}.lammps", "-screen", "none"])
             else:
                 self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
 
@@ -525,10 +539,16 @@ class Node:
             self.box_side = box[1][0] - box[0][0]
 
             self.__cut(my_atoms, types, old_lmp.get_natoms())
-            #print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
+            #Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
             
 
             self.potfile = potfile
+            try:
+                grandparent = self.__parent.get_parent()
+                del grandparent
+            except:
+                pass
+
         self.__lmp.command("run 0")
         self.__active = True
         self.__pe = self.__lmp.get_thermo("pe")

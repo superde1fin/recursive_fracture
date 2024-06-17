@@ -1,6 +1,6 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os
+import glob, os, sys
 import numpy as np
 import ctypes as ct
 import regex as re
@@ -84,6 +84,7 @@ class FracGraph:
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
+        self.__modify_struct()
         self.__head.attach(self.__tail)
         """
         node = self.attach(coords = (30, 15))
@@ -102,11 +103,12 @@ class FracGraph:
         else:
             Data.type_groups = max(sum(interactions, ()))
 
-        Helper.print(Data.type_groups)
+        Helper.print("Number of type groups:", Data.type_groups)
 
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
+        self.__modify_struct()
         head_lmp = self.__head.get_lmp()
 
         #Calculate simulation region sides
@@ -168,8 +170,7 @@ class FracGraph:
 
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
-        self.__head.activate()
-        starting_pe = self.__head.get_lmp().get_thermo("pe")
+        starting_pe = self.__head.activate()
 
         energies = {node : float("inf") for node in self.flatten()}
         energies[self.__head] = 0
@@ -183,9 +184,7 @@ class FracGraph:
                 continue
 
             Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
-            if parent_id != current.get_parent_id():
-                #Helper.print("Mismatch! Correct par_id:", parent_id, "actual par_id:", current.get_parent_id())
-                current.return2state(parent_id)
+            current.delete_extra(parent_id)
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
 
@@ -197,7 +196,7 @@ class FracGraph:
             neighbors = current.get_neighbors()
             for neighbor in neighbors:
                 if not neighbor.is_head() and neighbor.get_id() != parent_id:
-                    path_energy = neighbor.activate(parent = current, potfile = self.__new_potfile, test_mode = self.__test_mode) - starting_pe
+                    path_energy = neighbor.activate(parent = current) - starting_pe
                     #Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
                     if path_energy < energies[neighbor]:
                         self.__paths[neighbor] = current
@@ -249,6 +248,23 @@ class FracGraph:
 
         return new_node
 
+    def __modify_struct(self):
+        groups = Data.type_groups
+        ntypes = Data.initial_types
+        prev_name = self.__head.structure_file
+        text = open(prev_name, 'r').read()
+        text = re.sub(r"(?<=\s*)\d+(?=\s+atom types)", str(ntypes*groups), text)
+        name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", prev_name)
+        for t in range(1, ntypes + 1):
+            for g in range(groups - 1):
+                mass_re = re.compile(fr"^{ntypes*g + t}\s+\d+\.\d+$", re.MULTILINE)
+                mass_line = mass_re.findall(text)[-1]
+                text = mass_re.sub(mass_line + "\n" + re.sub(r"^\d+(?=\s+)", str(t + ntypes*(g + 1)), mass_line), text)
+                
+        open(name, "w").write(text)
+        self.__head.structure_file = name
+
+        
     def __modify_potfile(self, interactions):
         groups = Data.type_groups
         ntypes = Data.initial_types
@@ -294,12 +310,12 @@ class FracGraph:
         new_text = general_type_re.sub(type_names, new_text)
         new_potfile.write(new_text)
 
-        self.__new_potfile = name
+        self.__head.potfile = name
 
         
 
 class Node:
-    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False):
+    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False, timestep = 1):
         self.__id = node_ctr
         self.__active = False
         self.__is_head = is_head
@@ -312,6 +328,7 @@ class Node:
         self.__versions = dict()
 
         if self.__is_head:
+            self.__units = units
             if test_mode:
                 if os.path.isdir("logs"):
                     os.system("rm -r logs")
@@ -320,12 +337,13 @@ class Node:
             else:
                 self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
             self.__system_parameters_initialization(units = units)
+            self.__lmp.command(f"timestep {timestep}")
             if Data.structure_file:
                 filename = Data.structure_file
             else:
                 filename = glob.glob("glass_*.structure")[-1]
             self.__lmp.command(f"read_data {filename}")
-            self.__structure_file = filename
+            self.structure_file = os.path.abspath(filename)
             if Data.potfile:
                 self.potfile = Data.potfile
             else:
@@ -385,16 +403,13 @@ class Node:
             return np.pi/2
 
     def deactivate(self):
-        if self.__active:
+        if self.__active and not self.__is_head:
             self.__active = False
-            self.__lmp.close()
+            self.__lmp.delete_typeset(self.__typeset_id)
 
     #Getters
     def get_pe(self):
         return self.__pe
-
-    def get_struct_filename(self):
-        return self.__structure_file
 
     def get_id(self):
         return self.__id
@@ -464,19 +479,24 @@ class Node:
         #Computes
         self.__lmp.command("compute pe_pa all pe/atom")
 
-    def return2state(self, parent_id):
+    def delete_extra(self, parent_id):
         if not self.is_head():
-            self.__lmp.close()
+            prev_tid = self.__typeset_id
             for pid in self.__versions.keys():
                 if pid == parent_id:
-                    self.__lmp, self.__surface_area = self.__versions[parent_id]
+                    self.__typeset_id, self.__surface_area = self.__versions[parent_id]
+                    #print("Going back to type set:", self.__typeset_id)
+                    self.__lmp.change_typeset(self.__typeset_id)
+                    #print("Removing typest:", prev_tid)
+                    self.__lmp.delete_typeset(prev_tid)
                 else:
-                    self.__versions[pid][0].close()
+                    #print("Removing typest:",self.__versions[pid][0])
+                    self.__lmp.delete_typeset(self.__versions[pid][0])
 
 
     def __save_state(self):
         #Helper.print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
-        self.__versions[self.__parent.__id] = (self.__lmp, self.__surface_area)
+        self.__versions[self.__parent.__id] = (self.__typeset_id, self.__surface_area)
 
     def __reset(self):
         neighs = self.__neighbors
@@ -494,10 +514,15 @@ class Node:
 
 
 
-    def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, test_mode = False):
+    def activate(self, parent = None):
         if self.__is_head:
             if not self.__active:
+                self.__lmp.command("clear")
+                self.__system_parameters_initialization(units = self.__units)
+                self.__lmp.command(f"atom_modify map yes")
+                self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
+                self.__typset_id = 0
                 Helper.print("Head node activated")
         else:
             if self.__active:
@@ -506,18 +531,10 @@ class Node:
             if self.__active:
                 self.__reset()
 
-            old_lmp = self.__parent.get_lmp()
-            if test_mode:
-                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{self.__id}.lammps", "-screen", "none"])
-            else:
-                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
-
-            self.__system_parameters_initialization(units = units)
+            self.__lmp = self.__parent.get_lmp()
             self.__prev_theta = self.get_parent_angle()
 
-            self.__system_parameters_initialization(units = units)
-            self.__lmp.command(f"timestep {timestep}")
-            box = old_lmp.extract_box()
+            box = self.__lmp.extract_box()
 
             par_pos = self.__parent.get_pos()
             y_dist = self.__tip[1] - par_pos[1]
@@ -529,20 +546,16 @@ class Node:
             dist = np.sqrt((self.__tip[0] - par_pos[0])**2 + y_dist**2)
             self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
 
-            self.__lmp.command(f"region my_simbox block {box[0][0]} {box[1][0]} {box[0][1]} {box[1][1]} {box[0][2]} {box[1][2]}")
-            self.__lmp.command(f"create_box {Data.initial_types*Data.type_groups} my_simbox")
-            self.__vizualization(thermo_step, dump_step)
-            self.__lmp.command(f"include {potfile}")
-
-            my_atoms = np.array(old_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
-            types = np.array(old_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
+            my_atoms = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
+            types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
             self.box_side = box[1][0] - box[0][0]
 
-            self.__cut(my_atoms, types, old_lmp.get_natoms())
-            #Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}")
+            new_types = self.__new_types(my_atoms, types, self.__lmp.get_natoms())
+            self.__typeset_id = self.__lmp.add_typeset(new_types)
+            self.__lmp.change_typeset(self.__typeset_id)
+            #Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}")
             
 
-            self.potfile = potfile
             try:
                 grandparent = self.__parent.get_parent()
                 del grandparent
@@ -555,8 +568,9 @@ class Node:
         return self.__pe
 
 
-    def __cut(self, my_atoms, types, natoms):
+    def __new_types(self, my_atoms, types, natoms):
         prev_node = self.__parent.get_pos()
+        new_types_lst = list()
         for i in range(natoms):
             float_pos = my_atoms[i]
             group = self.__near_surface(float_pos[:-1], prev_node = prev_node)
@@ -580,8 +594,8 @@ class Node:
                 else:
                     new_type = types[i]
 
-            position = " ".join(map(str, float_pos))
-            self.__lmp.command(f"create_atoms {new_type} single {position}")
+            new_types_lst.append(new_type)
+        return new_types_lst
 
 
 

@@ -494,7 +494,7 @@ class Node:
 
 
 
-    def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000):
+    def activate(self, parent = None, potfile = None, timestep = 1, units = "real", thermo_step = 1000, dump_step = 1000, test_mode = False):
         if self.__is_head:
             if not self.__active:
                 self.__lmp.command(f"include {self.potfile}")

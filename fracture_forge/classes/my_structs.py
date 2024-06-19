@@ -184,7 +184,8 @@ class FracGraph:
                 continue
 
             Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
-            current.delete_extra(parent_id)
+            current.reset_lowest(parent_id)
+            Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "Ltid:", current.get_lmp().extract_global("current_typeset"), "TID:", current.get_tid())
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
 
@@ -369,6 +370,8 @@ class Node:
 
     def set_parent(self, node):
         if node:
+            if node.__lmp.extract_global("ntype_sets"):
+                node.__lmp.change_typeset(node.__typeset_id)
             node_pos = node.get_pos()
             if not (self.__tip[0] - node_pos[0]):
                 if self.__tip[1] > node_pos[1]:
@@ -396,18 +399,22 @@ class Node:
         self.__parent = node
 
 
+
+    def deactivate(self):
+        if self.__active and not self.__is_head and self.__lmp.extract_global("current_typeset") != self.__typeset_id:
+            self.__active = False
+            self.__lmp.delete_typeset(self.__typeset_id)
+
+    #Getters
     def get_parent_angle(self):
         if self.__parent and not self.__parent.is_head():
             return self.__parent.__theta
         else:
             return np.pi/2
 
-    def deactivate(self):
-        if self.__active and not self.__is_head:
-            self.__active = False
-            self.__lmp.delete_typeset(self.__typeset_id)
+    def get_tid(self):
+        return self.__typeset_id
 
-    #Getters
     def get_pe(self):
         return self.__pe
 
@@ -479,18 +486,19 @@ class Node:
         #Computes
         self.__lmp.command("compute pe_pa all pe/atom")
 
-    def delete_extra(self, parent_id):
+    def reset_lowest(self, parent_id):
         if not self.is_head():
+            self.__lmp.change_typeset(self.__typeset_id)
             prev_tid = self.__typeset_id
             for pid in self.__versions.keys():
                 if pid == parent_id:
                     self.__typeset_id, self.__surface_area = self.__versions[parent_id]
-                    #print("Going back to type set:", self.__typeset_id)
+                    Helper.print("Going back to type set:", self.__typeset_id)
                     self.__lmp.change_typeset(self.__typeset_id)
-                    #print("Removing typest:", prev_tid)
+                    Helper.print("Removing typest:", prev_tid)
                     self.__lmp.delete_typeset(prev_tid)
                 else:
-                    #print("Removing typest:",self.__versions[pid][0])
+                    Helper.print("Removing typest:",self.__versions[pid][0])
                     self.__lmp.delete_typeset(self.__versions[pid][0])
 
 
@@ -522,7 +530,7 @@ class Node:
                 self.__lmp.command(f"atom_modify map yes")
                 self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
-                self.__typset_id = 0
+                self.__typeset_id = 0
                 Helper.print("Head node activated")
         else:
             if self.__active:
@@ -550,10 +558,12 @@ class Node:
             types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
             self.box_side = box[1][0] - box[0][0]
 
+            old_tid = self.__lmp.extract_global("current_typeset")
+
             new_types = self.__new_types(my_atoms, types, self.__lmp.get_natoms())
             self.__typeset_id = self.__lmp.add_typeset(new_types)
             self.__lmp.change_typeset(self.__typeset_id)
-            #Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}")
+            Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}")
             
 
             try:
@@ -580,7 +590,7 @@ class Node:
                 else:
                     new_type = types[i]
             elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
-                if self.__theta > self.__prev_theta and group == 3 or self.__theta < self.__prev_theta and group == 2:
+                if self.__theta > self.__prev_theta + np.pi/2 and group == 3 or self.__theta < self.__prev_theta -np.pi/2 and group == 2:
                     tp = types[i]%Data.initial_types
                     tp = tp if tp else tp + Data.initial_types
                     new_type = tp + (group - 1)*Data.initial_types

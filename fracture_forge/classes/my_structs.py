@@ -49,7 +49,10 @@ class FracGraph:
 
     #Getters
     def get_box(self):
-        return self.__box
+        atom_box = tuple(self.__box)
+        atom_box[0][1] = Data.old_bounds[0]
+        atom_box[1][1] = Data.old_bounds[1]
+        return atom_box
 
     def get_head(self):
         return self.__head
@@ -179,6 +182,7 @@ class FracGraph:
             if current_energy > energies[current]:
                 continue
 
+            Helper.print("-----------------------------------------------------")
             Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
             current.reset_lowest(parent_id)
             Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "Ltid:", current.get_lmp().extract_global("current_typeset"), "TID:", current.get_tid())
@@ -194,7 +198,7 @@ class FracGraph:
             for neighbor in neighbors:
                 if not neighbor.is_head() and neighbor.get_id() != parent_id:
                     path_energy = neighbor.activate(parent = current) - starting_pe
-                    #Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
+                    Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
                     if path_energy < energies[neighbor]:
                         self.__paths[neighbor] = current
                         energies[neighbor] = path_energy
@@ -208,19 +212,25 @@ class FracGraph:
 
     def __rec_path_search(self, node):
         if node.is_head():
-            return [node]
+            return [node.get_pos()]
         else:
             ancestors = self.__rec_path_search(self.__paths[node])
-            ancestors.insert(0, node)
+            ancestors.insert(0, node.get_pos())
             return ancestors
 
     def get_paths(self):
         out = list()
         for node in self.__paths.keys():
             if node not in self.__paths.values():
-                out.append(self.__rec_path_search(node))
+                path = self.__rec_path_search(node)
+                if node.is_tail():
+                    path[0] = (path[1][0], path[0][1])
+                path[-1] = (path[-2][0], path[-1][1])
+                out.append(path)
 
-        return sorted(out, key = lambda node_lst : len(node_lst), reverse = True)
+        sorted_paths = sorted(out, key = lambda node_lst : len(node_lst), reverse = True)
+        max_length = len(sorted_paths[0])
+        return list(filter(lambda x: len(x)/max_length > 0.8, sorted_paths))
 
 
     def attach(self, coords):

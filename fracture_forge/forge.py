@@ -1,4 +1,4 @@
-import  os, sys, argparse
+import  os, sys, argparse, ast
 from classes.Storage import Data, SystemParams, Helper
 from classes.my_structs import FracGraph
 import numpy as np
@@ -32,21 +32,27 @@ def draw_lines(nodes):
 
 
 def color_paths(graph):
-    paths = graph.get_paths()
+    if not os.path.isfile("path_save.csv"):
+        paths = graph.get_paths()
+        writing = True
+        text = ""
+        file = open("path_save.csv", "w")
+    else:
+        writing = False
+        file = open("path_save.csv", "r")
+        paths = [[ast.literal_eval(pos.strip()) for pos in line.split('|')] for line in file.readlines()]
+        file.close()
+
     num_paths = len(paths)
     for npi, path in enumerate(paths):
-        parent = path[0]
+        parent_pos = path[0]
         i = 1
         num_nodes = len(path)
+        if writing:
+            text += "|".join(map(str, path)) + "\n"
         while i < num_nodes:
-            node = parent
-            parent = path[i]
-            node_pos = node.get_pos()
-            parent_pos = parent.get_pos()
-            if parent.is_head():
-                parent_pos = (node_pos[0], parent_pos[1])
-            if node.is_tail():
-                node_pos = (parent_pos[0], node_pos[1])
+            node_pos = parent_pos
+            parent_pos = path[i]
             if node_pos[0] - parent_pos[0]:
                 tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
                 line_x = np.linspace(parent_pos[0], node_pos[0], 100)
@@ -61,6 +67,9 @@ def color_paths(graph):
                 plt.plot(line_x, line_y, color = (0, 1, 0))
             
             i += 1
+    if writing:
+        file.write(text)
+        file.close()
 
 
 
@@ -134,14 +143,17 @@ def main():
     Data.non_inter_cutoff = args.width
 
     graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
-    graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-    #graph.build_test(interactions = args.interactions)
-    print("Number of nodes created:", len(graph))
+    if not os.path.isfile("path_save.csv"):
+        graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+        #graph.build_test(interactions = args.interactions)
+        print("Number of nodes created:", len(graph))
 
 
-    data_dir = "out_files" 
-    res = 0.69*graph.calculate(data_dir)
-    print("G:", res)
+        data_dir = "out_files" 
+        res = 0.69*graph.calculate(data_dir)
+        print("G:", res)
+    else:
+        Helper.print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 
     visualize(graph, args.radius, args.angle)
 

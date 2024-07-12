@@ -1,25 +1,27 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys
+import glob, os, sys, random
 import numpy as np
 import ctypes as ct
 import regex as re
 import heapq
 from scipy import interpolate
+from mpi4py import MPI
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
 
 class FracGraph:
-    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
-        self.__dr = connection_radius
+    def __init__(self, error = 0.1, test_mode = False, simulation_temp = 300):
         self.__test_mode = test_mode
         self.__head = Node(is_head = True, test_mode = self.__test_mode)
         self.__head.set_parent(None)
         self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1)
-        self.__node_ctr = 2
         self.__paths = dict()
-        self.__grid_size = error/np.sqrt(2)
-        if self.__dr < self.__grid_size:
-            self.__dr = self.__grid_size*1.5
-            Helper.print("Reset probe radius to allow for fracture graph connectivity")
+        #Testing
+        #self.__grid_size = error/np.sqrt(2)
+        self.__grid_size = 1
         head_lmp = self.__head.get_lmp()
 
         """Surface creation"""
@@ -33,22 +35,51 @@ class FracGraph:
                 max_y = atom[1]
         Data.old_bounds = (min_y, max_y)
 
-        Helper.print("Old bounds:", Data.old_bounds)
+        Helper.mpi_print("Old bounds:", Data.old_bounds)
         #head_lmp.command(f"change_box all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
         #head_lmp.command(f"fix surface_relax all npt temp {simulation_temp} {simulation_temp} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
         #head_lmp.command(f"run {Helper.convert_timestep(head_lmp, 0.1)}")
         #head_lmp.command("unfix surface_relax")
         """End of surface creation"""
 
-        box = head_lmp.extract_box()
-        self.__box = box
-        x_side = box[1][0] - box[0][0]
-        start_pos = (x_side/2 + box[0][0], Data.old_bounds[0] - start_buffer)
-        self.__head.set_tip(start_pos)
-        self.__tail.set_tip((x_side/2 + box[0][0], Data.old_bounds[1] + start_buffer))
-        self.__head.energy = 0
-        self.__tail.energy = 0
-        self.__node_hash = {self.__head.get_pos() : self.__head, self.__tail.get_pos() : self.__tail}
+        self.__original_box = np.array(head_lmp.extract_box()[:2])
+        self.__box = np.copy(self.__original_box)
+        self.__box[0][1] = Data.old_bounds[0]
+        self.__box[1][1] = Data.old_bounds[1]
+        self.__sides = self.__box[1] - self.__box[0]
+
+        num_divs = np.ceil(self.__sides/self.__grid_size).astype(int)
+        self.__energy_matrix = np.zeros(num_divs, dtype = float)
+
+
+    def __cmap(self, coords):
+        return np.floor(np.asarray(coords - self.__box[0])/self.__grid_size).astype(int)
+
+    def __str__(self):
+        return str(list(self.__energy_matrix.flatten()))
+
+    @Helper.linear_func
+    def save(self, name = "energy_landscape.csv"):
+        with open(name, "w") as f:
+            shape = self.__energy_matrix.shape
+            f.write(f"""{shape[0]} #X shape
+{shape[1]} #Y shape
+{shape[2]} #Z shape
+{self.__grid_size} #Grid size
+""")
+            f.write("\n".join(self.__energy_matrix.flatten().astype(str)))
+
+    def load_landscape(self, name = "energy_landscape.csv"):
+        x, y, z, self.__grid_size, *flat_landscape = np.loadtxt(name)
+        self.__energy_matrix = np.array(flat_landscape).reshape(int(x), int(y), int(z))
+
+    
+    def __merge_landscape(self):
+        if rank == 0:
+            comm.Reduce(MPI.IN_PLACE, self.__energy_matrix, op = MPI.SUM, root = 0)
+        else:
+            comm.Reduce(self.__energy_matrix, None, op = MPI.SUM, root = 0)
+    
 
     #Getters
     def get_box(self):
@@ -61,7 +92,7 @@ class FracGraph:
         return self.__head
 
     def __len__(self):
-        return self.__node_ctr
+        return np.count_nonzero(self.__energy_matrix)
 
     def flatten(self):
         return self.__node_hash.values()
@@ -89,13 +120,50 @@ class FracGraph:
 
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        self.__modify_potfile(interactions)
-        self.__modify_struct()
-        node = self.attach(coords = (25.315, 4.176))
-        self.__head.attach(node)
-        node1 = self.attach(coords = (24.325, 4.106))
-        node.attach(node1)
-        node1.attach(self.__tail)
+        pair_energy = -100
+        self.points = (np.array((5, 3, 4)), np.array((10, 12, 17)))
+        for cell in self.__get_line_cells(*self.points):
+            self.__energy_matrix[cell] += random.randint(0, 100)
+
+        self.__merge_landscape()
+
+    def test_get_line(self):
+        return zip(*self.points)
+
+    def get_energy_landscape(self):
+        flat_landscape = self.__energy_matrix.flatten()
+        return np.vstack((self.__box[0][:, np.newaxis] + (np.indices(self.__energy_matrix.shape).reshape(3, -1) + 0.5) * self.__grid_size, flat_landscape))[:,flat_landscape != 0]
+
+    def get_grid(self, span = None):
+        shape = self.__energy_matrix.shape
+        if span is None:
+            span = np.array([[0, 0, 0], np.array(shape) - 1])
+        else:
+            span = np.array(span)
+        grid_coords = np.indices(shape).reshape(3, -1).T
+
+        x_start = grid_coords[(grid_coords[:, 0] == span[0][0])&np.prod(grid_coords[:, 1:] >= span[0, 1:], axis = 1).astype(bool)&np.prod(grid_coords[:, 1:] <= span[1, 1:], axis = 1).astype(bool)]
+        y_start = grid_coords[(grid_coords[:, 1] == span[0][1])&np.prod(grid_coords[:, ::2] >= span[0, ::2], axis = 1).astype(bool)&np.prod(grid_coords[:, ::2] <= span[1, ::2], axis = 1).astype(bool)]
+        z_start = grid_coords[(grid_coords[:, 2] == span[0][2])&np.prod(grid_coords[:, :-1] >= span[0, :-1], axis = 1).astype(bool)&np.prod(grid_coords[:, :-1] <= span[1, :-1], axis = 1).astype(bool)]
+
+        # Create lines_start array
+        lines_start = np.vstack((x_start, y_start, z_start))
+        
+        # Create lines_end array
+        x_end = np.copy(x_start)
+        x_end[:, 0] = span[1][0]
+        y_end = np.copy(y_start)
+        y_end[:, 1] = span[1][1]
+        z_end = np.copy(z_start)
+        z_end[:, 2] = span[1][2]
+        lines_end = np.vstack((x_end, y_end, z_end))
+
+        grid_lines = np.stack((lines_start, lines_end), axis=-1)
+
+        
+        lines = grid_lines*self.__grid_size + self.__box[0][:, np.newaxis]
+
+        return lines
 
     def __build_potmap(self):
         file = open(self.__head.potfile, "r")
@@ -124,6 +192,58 @@ class FracGraph:
         file.close()
         return type_map
 
+    def __get_cell_center(self, cell_coords):
+        return self.__grid_size*(cell_coords + 0.5) + self.__box[0]
+
+    def __get_line_cells(self, pos1, pos2):
+        line_cells = set()
+        cell1 = self.__cmap(pos1)
+        cell2 = self.__cmap(pos2)
+        self.__rec_get_line_cells(cell1, cell2, pos1, pos2, line_cells)
+        return line_cells
+
+    def __rec_get_line_cells(self, cell1, cell2, pos1, pos2, line_cells):
+        line_cells.add(tuple(cell1))
+        #print(self.__get_cell_center(cell1))
+        if np.array_equal(cell1, cell2):
+            return
+
+        cell_lower_bounds = cell1*self.__grid_size + self.__box[0]
+        cell_center = self.__get_cell_center(cell1)
+        dx, dy, dz = pos2 - pos1 #Line vector
+        #print("Line vector:", dx, dy, dz)
+        #Check whether the line in question intersects with each plane of the pos1 cell
+        for vec in np.array([(1, 0, 0), (0, 1, 0), (0, 0, 1), (-1, 0, 0), (0, -1, 0), (0, 0, -1)]):
+            point = cell_center + self.__grid_size*vec/2
+            A, B, C, D = *vec, np.sum(-point*vec) #Plane definition Ax + By + Cz + D = 0
+            numerator = -A*pos1[0] - B*pos1[1] - C*pos1[2] - D
+            denominator = A*dx + B*dy + C*dz
+            #print("Current cell:", cell1, "Probe vector:", vec, "Numerator:", numerator, "Denominator:", denominator)
+            if denominator == 0:
+                if numerator == 0:
+                    line_cells.add(cell1 + vec) #Line is in the plane in question. Add neighboring cell and proceed forward based on the intersecitons with other planes
+                else:
+                    pass #No intersection with the plane in question
+            else:
+                t = numerator/denominator
+                #print("Line parameter:", t)
+                if t >= 0: #Check that the scan is not backwards
+                    intersection = pos1 + np.array([dx, dy, dz])*t
+                    #Create comapative upper in lower bounds with the direction of the intersecting plane masked out
+                    comp_low = self.__trunc(np.copy(cell_lower_bounds), 3)
+                    comp_high = self.__trunc(np.copy(cell_lower_bounds + self.__grid_size), 3)
+                    comp_low[np.argmax(np.abs(vec))] = -np.inf
+                    comp_high[np.argmax(np.abs(vec))] = np.inf
+                    #print("Comparisons:", comp_low, comp_high)
+                    #print("Intersection:", intersection)
+                    if np.prod(comp_low <= self.__trunc(intersection, 3)) and np.prod(comp_high >= self.__trunc(intersection, 3)):
+                        next_cell = cell1 + vec
+                        if not tuple(next_cell) in line_cells:
+                            self.__rec_get_line_cells(next_cell, cell2, intersection, pos2, line_cells)
+                        else:
+                            #print("Cell already visited")
+                            pass
+
 
 
     def build(self, pivot_atom_type, num_neighs, interactions = "default"):
@@ -132,7 +252,7 @@ class FracGraph:
         else:
             Data.type_groups = max(sum(interactions, ()))
 
-        Helper.print("Number of type groups:", Data.type_groups)
+        Helper.mpi_print("Number of type groups:", Data.type_groups)
 
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
@@ -140,19 +260,20 @@ class FracGraph:
         self.__head.activate()
         forcefield = self.__build_potmap()
 
-        #Calculate simulation region sides
-        sides = np.array([self.__box[1][0] - self.__box[0][0], self.__box[1][1] - self.__box[0][1], self.__box[1][2] - self.__box[0][2]])
-
+        """
         head_divs = int(np.ceil(sides[0]/self.__dr))
         head_step = sides[0]/head_divs
         head_nodes = dict()
         tail_nodes = dict()
+        """
 
         #Gather per-atom information
         positions = np.array(head_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
         types = np.array(head_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
         neigh_lists = head_lmp.numpy.get_neighlist(head_lmp.find_pair_neighlist("table"))
         tags = head_lmp.extract_atom("id")
+        Helper.print(f"Starting neighbor lookup on process {rank}")
+        ctr = 0
         for local_id, nlist in neigh_lists:
             tag1 = tags[local_id]
             type1 = types[tag1 - 1]
@@ -160,34 +281,18 @@ class FracGraph:
                 tag2 = tags[id2]
                 type2 = types[tag2 - 1]
                 delta = positions[tag1 - 1] - positions[tag2 - 1]
-                delta -= np.around(delta/sides)*sides
+                delta -= np.around(delta/self.__sides)*self.__sides
                 dist = np.linalg.norm(delta)
                 type_key = tuple(sorted((type1, type2)))
-                if dist >= forcefield[type_key].x.min() and dist <= forcefield[type_key].x.max():
+                if forcefield[type_key].x.min() <= dist and dist <= forcefield[type_key].x.max():
+                    ctr += 1
                     pair_energy = forcefield[type_key](dist)
-                    mid_pos = positions[tag2 - 1] + delta/2
-                    mid_pos += (mid_pos < self.__box[0])*sides
-                    mid_pos -= (mid_pos > self.__box[1])*sides
-                    node = self.attach(coords = mid_pos[:-1], energy = pair_energy)
-                    disc_coords = node.get_pos()
-                    node_pos = int(np.floor((disc_coords[0] - self.__box[0][0])/head_step))
-                    if node_pos in head_nodes:
-                        if disc_coords[1] < head_nodes[node_pos].get_pos()[1]:
-                            head_nodes[node_pos] = node
-                    else:
-                        head_nodes[node_pos] = node
+                    for cell in self.__get_line_cells(positions[tag1 -1], positions[tag2 - 1]):
+                        self.__energy_matrix[tuple(cell)] -= pair_energy
+        Helper.print(f"Finished neighbor lookup on process {rank} with {ctr} pairs")
 
-                    if node_pos in tail_nodes:
-                        if disc_coords[1] > tail_nodes[node_pos].get_pos()[1]:
-                            tail_nodes[node_pos] = node
-                    else:
-                        tail_nodes[node_pos] = node
+        self.__merge_landscape()
 
-        for head_neigh in head_nodes.values():
-            self.__head.attach(head_neigh)
-
-        for tail_neigh in tail_nodes.values():
-            self.__tail.attach(tail_neigh)
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         if os.path.isdir(save_dir):
@@ -481,7 +586,7 @@ class Node:
                 self.__lmp.command(f"atom_modify map yes")
                 self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
-                Helper.print("Head node activated")
+                Helper.mpi_print("Head node activated")
                 self.__lmp.command("run 0")
         else:
             if self.__active:

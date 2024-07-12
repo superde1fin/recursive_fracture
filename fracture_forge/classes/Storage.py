@@ -1,5 +1,6 @@
 import sys, os, shutil
 from mpi4py import MPI
+import functools
 
 class Data:
     units_data = {
@@ -53,4 +54,14 @@ class Helper:
     @staticmethod
     def convert_timestep(lmp, step): #ns  - step
         return int((step*1e-9)/(lmp.eval("dt")*Data.units_data[SystemParams.parameters["units"]]["timestep"]))
+
+    @staticmethod
+    def linear_func(func):
+        @functools.wraps(func)
+        def decorator(*args, **kwargs):
+            if MPI.COMM_WORLD.Get_rank() == 0:
+                return func(*args, **kwargs)
+            else:
+                return None
+        return decorator
 

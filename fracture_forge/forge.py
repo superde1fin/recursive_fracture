@@ -4,110 +4,67 @@ from classes.my_structs import FracGraph
 import numpy as np
 
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+@Helper.linear_func
+def get_RGB(eng, min_eng, max_eng):
+    norm_eng = (eng - min_eng)/(max_eng - min_eng)
+    norm_eng = np.where(norm_eng < 0, 0, norm_eng)
+    norm_eng = np.where(norm_eng > 1, 1, norm_eng)
+    R = np.where(norm_eng <= 0.5, 2 * norm_eng, 1)
+    G = np.where(norm_eng <= 0.5, 1, 2 * (1 - norm_eng))
+    B = np.zeros_like(norm_eng)
+
+    return np.stack((R, G, B), axis=-1)
 
 
-def draw_arcs(nodes, alpha, R):
-    for node in nodes:
-        if not node.is_leaf():
-            circ_angles = np.linspace(alpha*np.pi/180, np.pi*(1 - alpha/180), 100)
-            point = node.get_pos()
-            circ_x = point[0] + R*np.cos(circ_angles)
-            circ_y = point[1] + R*np.sin(circ_angles)
-            plt.plot(circ_x, circ_y, color = "blue")
+@Helper.linear_func
+def visualize(graph, show_box = False):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    # Generate sample data
+    x, y, z, energies = graph.get_energy_landscape()
+    min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
+    colors = get_RGB(energies, min_eng, max_eng)
+    #sizes = 100*(energies - min_eng)/(max_eng - min_eng)
+    ax.scatter(x, y, z, c = colors, marker = 'o', s = 100, depthshade = False, alpha = 0.8)
+    if show_box:
+        box = graph.get_box()
+        ax.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], [box[0][2], box[0][2]], 'b-')
+        ax.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], [box[1][2], box[1][2]], 'b-')
+        ax.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], [box[0][2], box[0][2]], 'b-')
+        ax.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], [box[1][2], box[1][2]], 'b-')
 
-def draw_lines(nodes):
-    for node in nodes:
-        parent_pos = node.get_pos()
-        for child in node.get_neighbors():
-            node_pos = child.get_pos()
-            if node_pos[0] - parent_pos[0]:
-                tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
-                line_x = np.linspace(parent_pos[0], node_pos[0], 100)
-                line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
-            else:
-                line_x = [node_pos[0], node_pos[0]]
-                line_y = [parent_pos[1], node_pos[1]]
+        ax.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], [box[0][2], box[0][2]], 'b-')
+        ax.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], [box[0][2], box[0][2]], 'b-')
+        ax.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], [box[1][2], box[1][2]], 'b-')
+        ax.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], [box[1][2], box[1][2]], 'b-')
 
-            plt.plot(line_x, line_y, color = "red")
+        ax.plot([box[0][0], box[0][0]], [box[0][1], box[0][1]], [box[1][2], box[0][2]], 'b-')
+        ax.plot([box[0][0], box[0][0]], [box[1][1], box[1][1]], [box[1][2], box[0][2]], 'b-')
+        ax.plot([box[1][0], box[1][0]], [box[0][1], box[0][1]], [box[1][2], box[0][2]], 'b-')
+        ax.plot([box[1][0], box[1][0]], [box[1][1], box[1][1]], [box[1][2], box[0][2]], 'b-')
 
+    """
+    for x, y, z in graph.get_grid(span = [[1, 1, 0], [6, 9, 12]]):
+        ax.plot(x, y, z, 'b-')
 
-def color_paths(graph):
-    if not os.path.isfile("path_save.csv"):
-        paths = graph.get_paths()
-        writing = True
-        text = ""
-        file = open("path_save.csv", "w")
-    else:
-        writing = False
-        file = open("path_save.csv", "r")
-        paths = [[ast.literal_eval(pos.strip()) for pos in line.split('|')] for line in file.readlines()]
-        file.close()
-
-    num_paths = len(paths)
-    for npi, path in enumerate(paths):
-        parent_pos = path[0]
-        i = 1
-        num_nodes = len(path)
-        if writing:
-            text += "|".join(map(str, path)) + "\n"
-        while i < num_nodes:
-            node_pos = parent_pos
-            parent_pos = path[i]
-            if node_pos[0] - parent_pos[0]:
-                tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
-                line_x = np.linspace(parent_pos[0], node_pos[0], 100)
-                line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
-            else:
-                line_x = [node_pos[0], node_pos[0]]
-                line_y = [parent_pos[1], node_pos[1]]
-
-            if num_paths - 1:
-                plt.plot(line_x, line_y, color = (npi/(num_paths - 1), 1 - npi/(num_paths - 1) , 0))
-            else:
-                plt.plot(line_x, line_y, color = (0, 1, 0))
-            
-            i += 1
-    if writing:
-        file.write(text)
-        file.close()
-
-
-
-def visualize(graph, dr, dtheta):
-    nodes = graph.flatten()
-    points = np.array([node.get_pos() for node in nodes])
-    #points = graph.get_node_coords()
-
-    x = points[:, 0]
-    y = points[:, 1]
-
-    #draw_arcs(nodes, dtheta, dr)
-    #draw_lines(nodes)
-    color_paths(graph)
-
-    box = graph.get_box()
-    plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black", alpha = 0.1)
-    plt.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], color = "black", alpha = 0.1)
-    plt.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], color = "black", alpha = 0.1)
-    plt.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], color = "black", alpha = 0.1)
-
-    #plt.plot(x, y, marker = 'o', linestyle = 'None', color = "black")
-    ax = plt.gca()
-    ax.set_aspect("equal", adjustable = "box")
-    plt.savefig("energy_landscape.png")
+    x, y, z = graph.test_get_line()
+    ax.plot(x, y, z, 'b-')
+    """
+    ax.set_xlabel('X Label')
+    ax.set_ylabel('Y Label')
+    ax.set_zlabel('Z Label')
     plt.show()
+
 
 def parser_call():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
-    parser.add_argument("-r", "--radius", type = int, default = SystemParams.dr, help = "Probe radius", metavar = "")
-    parser.add_argument("-e", "--error", type = int, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
-    parser.add_argument("-a", "--angle", type = int, default = SystemParams.dtheta, help = "Angle between the branches of the fracture tree", metavar = "")
+    parser.add_argument("-e", "--error", type = float, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
     parser.add_argument("-i", "--interactions", action = "store_true", help = "Prompts the user to specify interactions between type groups")
     parser.add_argument("-s", "--structure", default = None, help = "System structure file in lammps format", metavar = "")
     parser.add_argument("-f", "--force_field", default = None, help = "Forcfield defining atom interactions", metavar = "")
-    parser.add_argument("-p", "--pivot_type", default = SystemParams.pivot_type, help = "Numerical type corresponding to a atoms around which the fracture nodes will be created", metavar = "")
-    parser.add_argument("-n", "--neighbors", default = SystemParams.neigh_num, help = "Number of nearest neighbors to the pivot atom, used to determine the midpoint of bonds between the pivot atom and its neighbors for fracture node creation", metavar = "")
+    parser.add_argument("-l", "--landscape", default = None, help = "Saved fracture energy landscape file", metavar = "")
     parser.add_argument("-w", "--width", default = Data.non_inter_cutoff, help = "Surface width", metavar = "", type = int)
     args = parser.parse_args()
 
@@ -142,20 +99,25 @@ def main():
     Data.potfile = args.force_field
     Data.non_inter_cutoff = args.width
 
-    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
+    graph = FracGraph(error = args.error, test_mode = False)
     if not os.path.isfile("path_save.csv"):
-        graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-        #graph.build_test(interactions = args.interactions)
-        print("Number of nodes created:", len(graph))
+        if args.landscape is None:
+            #graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+            graph.build_test(interactions = args.interactions)
+            graph.save()
+        else:
+            Helper.mpi_print("Loading landscape from file")
+            graph.load_landscape(os.path.abspath(args.landscape))
+        Helper.mpi_print("Number of nodes created:", len(graph))
 
 
         data_dir = "out_files" 
-        res = 0.69*graph.calculate(data_dir)
-        print("G:", res)
+        #res = 0.69*graph.calculate(data_dir)
+        #print("G:", res)
     else:
         Helper.print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 
-    visualize(graph, args.radius, args.angle)
+    visualize(graph)
 
 
 

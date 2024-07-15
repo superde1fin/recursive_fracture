@@ -13,44 +13,66 @@ rank = comm.Get_rank()
 size = comm.Get_size()
 
 class FracGraph:
-    def __init__(self, error = 0.1, test_mode = False, simulation_temp = 300):
-        self.__test_mode = test_mode
-        self.__head = Node(is_head = True, test_mode = self.__test_mode)
-        self.__head.set_parent(None)
-        self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1)
-        self.__paths = dict()
+    def __init__(self, error = 0.1, simulation_temp = 300, test_mode = False, units = "real"):
         #Testing
         #self.__grid_size = error/np.sqrt(2)
         self.__grid_size = 1
-        head_lmp = self.__head.get_lmp()
 
-        """Surface creation"""
-        min_y = float("inf")
-        max_y = float("-inf")
-        my_atoms = np.array(head_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
-        for atom in my_atoms:
-            if atom[1] < min_y:
-                min_y = atom[1]
-            if atom[1] > max_y:
-                max_y = atom[1]
-        Data.old_bounds = (min_y, max_y)
+        self.__lmp = self.__read_structure(units = units, test_mode = test_mode)
+        
 
-        Helper.mpi_print("Old bounds:", Data.old_bounds)
-        #head_lmp.command(f"change_box all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
-        #head_lmp.command(f"fix surface_relax all npt temp {simulation_temp} {simulation_temp} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
-        #head_lmp.command(f"run {Helper.convert_timestep(head_lmp, 0.1)}")
-        #head_lmp.command("unfix surface_relax")
-        """End of surface creation"""
-
-        self.__original_box = np.array(head_lmp.extract_box()[:2])
-        self.__box = np.copy(self.__original_box)
-        self.__box[0][1] = Data.old_bounds[0]
-        self.__box[1][1] = Data.old_bounds[1]
+        self.__original_box = np.array(self.__lmp.extract_box()[:2])
+        self.__box = self.__detect_surface_regions()
         self.__sides = self.__box[1] - self.__box[0]
 
         num_divs = np.ceil(self.__sides/self.__grid_size).astype(int)
-        self.__energy_matrix = np.zeros(num_divs, dtype = float)
+        self.__energy_matrix = np.empty(num_divs, dtype = Cell)
+        for index in np.ndindex(tuple(num_divs)):
+            self.__energy_matrix[index] = Cell(position = index)
 
+    def __detect_surface_regions(self):
+        mins = np.full((3,), np.inf)
+        maxs = np.full((3,), -np.inf)
+        my_atoms = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
+        for atom in my_atoms:
+            for i in range(3):
+                if atom[i] < mins[i]:
+                    mins[i] = atom[i]
+                if atom[i] > maxs[i]:
+                    maxs[i] = atom[i]
+
+        result = np.array((mins, maxs))
+        Helper.mpi_print("Atomic bounds:", result)
+        return result
+
+    def __read_structure(self, units, test_mode):
+        if test_mode:
+            if os.path.isdir("logs"):
+                os.system("rm -r logs")
+            lmp = lammps(cmdargs = ["-log", f"log.lammps"])
+        else:
+            lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
+        lmp.command(f"units {units}")
+        lmp.command("atom_style charge")
+        lmp.command("boundary p p p")
+        lmp.command("comm_modify mode single vel yes")
+        lmp.command("neighbor 2.0 bin")
+        lmp.command("neigh_modify every 1 delay 0")
+        if Data.structure_file:
+            filename = Data.structure_file
+        else:
+            filename = glob.glob("glass_*.structure")[-1]
+        self.__structure_file = os.path.abspath(filename)
+        lmp.command(f"read_data {self.__structure_file}")
+        if Data.potfile:
+            self.potfile = Data.potfile
+        else:
+            name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
+            self.__potfile = os.path.abspath(f"pot_{name_handle}.FF")
+        lmp.command(f"include {self.__potfile}")
+
+        lmp.command("run 0")
+        return lmp
 
     def __cmap(self, coords):
         return np.floor(np.asarray(coords - self.__box[0])/self.__grid_size).astype(int)
@@ -75,10 +97,10 @@ class FracGraph:
 
     
     def __merge_landscape(self):
+        data = comm.gather(self.__energy_matrix, root = 0)
         if rank == 0:
-            comm.Reduce(MPI.IN_PLACE, self.__energy_matrix, op = MPI.SUM, root = 0)
-        else:
-            comm.Reduce(self.__energy_matrix, None, op = MPI.SUM, root = 0)
+            for matrix in data:
+                self.__energy_matrix += matrix
     
 
     #Getters
@@ -88,29 +110,13 @@ class FracGraph:
         atom_box[1][1] = Data.old_bounds[1]
         return atom_box
 
-    def get_head(self):
-        return self.__head
-
     def __len__(self):
         return np.count_nonzero(self.__energy_matrix)
-
-    def flatten(self):
-        return self.__node_hash.values()
-
-    def get_node_coords(self):
-        return np.array(list(self.__node_hash.keys()))
-        #return np.array([neigh.get_pos() for neigh in self.__tail.get_neighbors()])
 
     def __trunc(self, values, dec = 0):
         return np.trunc(np.array(values)*(10**dec))/(10**dec)
 
     #Main behavior
-    def __discretize(self, coords):
-        rel_coords = np.array(coords) - self.__box[0][:-1]
-        grid_coords = self.__grid_size*np.around(rel_coords/self.__grid_size) + self.__box[0][:-1]
-        grid_coords -= (grid_coords > self.__box[1][:-1])*self.__grid_size
-        return tuple(self.__trunc(grid_coords, 3))
-        return tuple(grid_coords)
 
     def build_test(self, interactions):
         if interactions == "default":
@@ -119,13 +125,14 @@ class FracGraph:
             Data.type_groups = max(sum(interactions, ()))
 
 
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         pair_energy = -100
         self.points = (np.array((5, 3, 4)), np.array((10, 12, 17)))
-        for cell in self.__get_line_cells(*self.points):
-            self.__energy_matrix[cell] += random.randint(0, 100)
+        line_cells = self.__get_line_cells(*self.points)
+        new_bond = Bond(cells = line_cells, energy = pair_energy)
+        for cell in line_cells:
+            cell.add_bond(new_bond)
 
-        self.__merge_landscape()
+        #self.__merge_landscape()
 
     def test_get_line(self):
         return zip(*self.points)
@@ -166,7 +173,7 @@ class FracGraph:
         return lines
 
     def __build_potmap(self):
-        file = open(self.__head.potfile, "r")
+        file = open(self.__potfile, "r")
         text = file.read()
         table_file = re.findall(pattern = r"(?<=^variable\s+table_path.+\").+(?=\")", string = text, flags = re.MULTILINE)[-1]
         pair_coeff_lines = re.findall(pattern = r"(?<=^pair_coeff\s+)((?:[^\s]+\s+){5})", string = text, flags = re.MULTILINE)
@@ -203,7 +210,7 @@ class FracGraph:
         return line_cells
 
     def __rec_get_line_cells(self, cell1, cell2, pos1, pos2, line_cells):
-        line_cells.add(tuple(cell1))
+        line_cells.add(self.__energy_matrix[tuple(cell1)])
         #print(self.__get_cell_center(cell1))
         if np.array_equal(cell1, cell2):
             return
@@ -238,7 +245,7 @@ class FracGraph:
                     #print("Intersection:", intersection)
                     if np.prod(comp_low <= self.__trunc(intersection, 3)) and np.prod(comp_high >= self.__trunc(intersection, 3)):
                         next_cell = cell1 + vec
-                        if not tuple(next_cell) in line_cells:
+                        if not self.__energy_matrix[tuple(next_cell)] in line_cells:
                             self.__rec_get_line_cells(next_cell, cell2, intersection, pos2, line_cells)
                         else:
                             #print("Cell already visited")
@@ -246,7 +253,7 @@ class FracGraph:
 
 
 
-    def build(self, pivot_atom_type, num_neighs, interactions = "default"):
+    def build(self, interactions = "default"):
         if interactions == "default":
             Data.type_groups = 1
         else:
@@ -255,23 +262,13 @@ class FracGraph:
         Helper.mpi_print("Number of type groups:", Data.type_groups)
 
 
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        head_lmp = self.__head.get_lmp()
-        self.__head.activate()
         forcefield = self.__build_potmap()
 
-        """
-        head_divs = int(np.ceil(sides[0]/self.__dr))
-        head_step = sides[0]/head_divs
-        head_nodes = dict()
-        tail_nodes = dict()
-        """
-
         #Gather per-atom information
-        positions = np.array(head_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
-        types = np.array(head_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
-        neigh_lists = head_lmp.numpy.get_neighlist(head_lmp.find_pair_neighlist("table"))
-        tags = head_lmp.extract_atom("id")
+        positions = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
+        types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
+        neigh_lists = self.__lmp.numpy.get_neighlist(self.__lmp.find_pair_neighlist("table"))
+        tags = self.__lmp.extract_atom("id")
         Helper.print(f"Starting neighbor lookup on process {rank}")
         ctr = 0
         for local_id, nlist in neigh_lists:
@@ -287,8 +284,14 @@ class FracGraph:
                 if forcefield[type_key].x.min() <= dist and dist <= forcefield[type_key].x.max():
                     ctr += 1
                     pair_energy = forcefield[type_key](dist)
-                    for cell in self.__get_line_cells(positions[tag1 -1], positions[tag2 - 1]):
-                        self.__energy_matrix[tuple(cell)] -= pair_energy
+                    cell_list = self.__get_line_cells(positions[tag1 -1], positions[tag2 - 1])
+                    new_bond = Bond(energy = pair_energy, cells = cell_list)
+                    for cell in cell_list:
+                        cell.add_bond(new_bond)
+                    if ctr == 100:
+                        break
+            if ctr == 100:
+                break
         Helper.print(f"Finished neighbor lookup on process {rank} with {ctr} pairs")
 
         self.__merge_landscape()
@@ -339,283 +342,94 @@ class FracGraph:
         self.__head.reset_tip()
         return float("inf")
 
-    def __rec_path_search(self, node):
-        if node.is_head():
-            return [node.get_pos()]
-        else:
-            ancestors = self.__rec_path_search(self.__paths[node])
-            ancestors.insert(0, node.get_pos())
-            return ancestors
 
-    def get_paths(self):
-        out = list()
-        for node in self.__paths.keys():
-            if node not in self.__paths.values():
-                path = self.__rec_path_search(node)
-                if node.is_tail():
-                    path[0] = (path[1][0], path[0][1])
-                path[-1] = (path[-2][0], path[-1][1])
-                out.append(path)
+class Bond:
 
-        sorted_paths = sorted(out, key = lambda node_lst : len(node_lst), reverse = True)
-        max_length = len(sorted_paths[0])
-        return list(filter(lambda x: len(x)/max_length > 0.8, sorted_paths))
+    def __init__(self, energy, cells):
+        self.__energy = energy
+        self.__cells = cells
+
+    @property
+    def energy(self):
+        return self.__energy
+
+    @property
+    def cells(self):
+        return self.__cells
+
+    def fracture(self):
+        for cell in self.__cells:
+            cell.energy -= self.__energy
 
 
-    def attach(self, coords, energy):
-        disc_coords = self.__discretize(coords)
+class Cell:
 
-        if disc_coords in self.__node_hash:
-            new_node = self.__node_hash[disc_coords]
-        else:
-            new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr)
-            self.__node_hash[disc_coords] = new_node
-            Helper.print("Created a new node", self.__node_ctr)
-            self.__node_ctr += 1
+    def __init__(self, energy = 0, position = (0, 0, 0)):
+        self.energy = energy
+        self.__bonds = set()
+        self.__pos = position
 
-        new_node.energy += energy
-        num_bins = int(np.floor(self.__dr/self.__grid_size))
-        for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1):
-            for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
-                neigh_coords = self.__discretize((x, y))
-                if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
-                    new_node.attach(self.__node_hash[neigh_coords])
+    def add_bond(self, bond):
+        self.__bonds.add(bond)
+        self.energy += bond.energy
 
+    def fracture(self):
+        for bond in self.__bonds:
+            bond.fracture()
 
+    @property
+    def position(self):
+        return self.__pos
 
-        return new_node
-
-        
-
-class Node:
-    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False, timestep = 1):
-        self.__id = node_ctr
-        self.__active = False
-        self.__is_head = is_head
-        self.__is_tail = is_tail
-        self.__neighbors = set()
-        self.__tip = tip
-        self.__surface_area = 0
-        self.__test_mode = test_mode
-        self.__old_tip = None
-        self.__versions = dict()
-        self.energy = 0
-
-        if self.__is_head:
-            self.__units = units
-            if test_mode:
-                if os.path.isdir("logs"):
-                    os.system("rm -r logs")
-                os.mkdir("logs")
-                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.0.lammps"])
-            else:
-                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
-            self.__system_parameters_initialization(units = units)
-            self.__lmp.command(f"timestep {timestep}")
-            if Data.structure_file:
-                filename = Data.structure_file
-            else:
-                filename = glob.glob("glass_*.structure")[-1]
-            self.__lmp.command(f"read_data {filename}")
-            self.structure_file = os.path.abspath(filename)
-            if Data.potfile:
-                self.potfile = Data.potfile
-            else:
-                name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
-                self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
-            
-
-    #Setters
-
-    def set_tip(self, coords):
-        if self.__is_head or self.__is_tail:
-            self.__tip = coords
-        if not self.__old_tip and (self.__is_tail or self.__is_head):
-            self.__old_tip = coords
-
-    def reset_tip(self):
-        if self.__is_tail or self.__is_head:
-            self.__tip = self.__old_tip
-
-    def attach(self, node):
-        self.__neighbors.add(node)
-        node.__neighbors.add(self)
-        return self
-
-    def set_parent(self, node):
-        if node:
-            node_pos = node.get_pos()
-            if not (self.__tip[0] - node_pos[0]):
-                if self.__tip[1] > node_pos[1]:
-                    self.__theta = np.pi/2
-                else:
-                    self.__theta = -np.pi/2
-            else:
-                x = self.__tip[0] - node_pos[0]
-                if x > 0:
-                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x)
-                else:
-                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x) + np.pi
-
-
-            if self.is_tail():
-                self.__theta = np.pi/2
-                par_pos = node.get_pos()
-                self.set_tip((par_pos[0], self.get_pos()[1]))
-
-            if node.is_head():
-                self.__theta = np.pi/2
-                node.set_tip((self.__tip[0], node.get_pos()[1]))
-
-            #Helper.print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
-        self.__parent = node
-
-
-
-    #Getters
-    def get_parent_angle(self):
-        if self.__parent and not self.__parent.is_head():
-            return self.__parent.__theta
-        else:
-            return np.pi/2
-
-    def get_pe(self):
-        return self.__pe
-
-    def get_id(self):
-        return self.__id
-
-    def get_parent_id(self):
-        if self.__is_head:
-            return None
-        else:
-            return self.__parent.__id
-
-    def get_parent(self):
-        return self.__parent
-
-    def get_surface_area(self):
-        return self.__surface_area
-
-    def get_neighbors(self):
-        return list(self.__neighbors)
-
-    def get_pos(self):
-        return self.__tip
-
-    def get_path_pe(self):
-        return self.__path_pe
-
-    def get_lowest_leaf(self):
-        return self.__lowest_leaf
-
-    def get_lmp(self):
-        return self.__lmp
-
-    #State functions
-    def is_head(self):
-        return self.__is_head
-
-    def is_tail(self):
-        return self.__is_tail
-
-    def is_active(self):
-        return self.__active
-
-    #Built-in reassignment
     def __str__(self):
-        return f"id: {self.__id}, position: {self.get_pos()}"
+        return str(self.energy)
+
+    def __add__(self, other):
+        if isinstance(other, Cell):
+            self.__bonds.update(other.__bonds)
+            self.energy += other.energy
+            return self
+        else:
+            return NotImplemented
+
+    def __bool__(self):
+        return self.energy != 0
+
+    def __lt__(self, other):
+        if isinstance(other, Cell):
+            return self.energy < other.energy
+        else:
+            return NotImplemented
+
+    def __le__(self, other):
+        if isinstance(other, Cell):
+            return self.energy <= other.energy
+        else:
+            return NotImplemented
+
+    def __gt__(self, other):
+        if isinstance(other, Cell):
+            return self.energy > other.energy
+        else:
+            return NotImplemented
+
+    def __ge__(self, other):
+        if isinstance(other, Cell):
+            return self.energy >= other.energy
+        else:
+            return NotImplemented
+
+    def __eq__(self, other):
+        if isinstance(other, Cell):
+            return self.energy == other.energy
+        else:
+            return NotImplemented
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self.__pos)
 
     def __repr__(self):
-        return f"{self.__id}"
-
-    def __lt__(self, node):
-        return self.__id < node.__id
-
-    #Main behavior
-    def __system_parameters_initialization(self, units):
-        self.__lmp.command(f"units {units}")
-        SystemParams.units = units
-        self.__lmp.command("atom_style charge")
-        self.__lmp.command("boundary p p p")
-        self.__lmp.command("comm_modify mode single vel yes")
-        self.__lmp.command("neighbor 2.0 bin")
-        self.__lmp.command("neigh_modify every 1 delay 0")
-
-    def __vizualization(self, thermo_step, dump_step):
-        #self.__lmp.command(f"thermo {thermo_step}")
-        #self.__lmp.command("thermo_style custom step temp etotal pe vol density pxx pyy pzz")
-        #self.__lmp.command("thermo_modify flush yes")
-
-        #Computes
-        self.__lmp.command("compute pe_pa all pe/atom")
-
-    def reset_lowest(self, parent_id):
-        if not self.is_head():
-            for pid in self.__versions.keys():
-                if pid == parent_id:
-                    self.__surface_area, self.__theta = self.__versions[parent_id]
-            self.__versions = dict()
-
-
-    def __save_state(self):
-        #Helper.print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
-        self.__versions[self.__parent.__id] = (self.__surface_area, self.__theta)
-
-    def __reset(self):
-        neighs = self.__neighbors
-        theta = self.__theta
-        old_tip = self.__old_tip
-        parent = self.__parent
-        versions = self.__versions
-        self.__init__(is_head = self.__is_head, is_tail = self.__is_tail, node_ctr = self.__id, tip = self.__tip)
-        self.__neighbors = neighs
-        self.__theta = theta
-        self.__parent = parent
-        self.__old_tip = old_tip
-        self.__versions = versions
-
-
-
-
-    def activate(self, parent = None):
-        if self.__is_head:
-            if not self.__active:
-                self.__lmp.command("clear")
-                self.__system_parameters_initialization(units = self.__units)
-                self.__lmp.command(f"atom_modify map yes")
-                self.__lmp.command(f"read_data {self.structure_file}")
-                self.__lmp.command(f"include {self.potfile}")
-                Helper.mpi_print("Head node activated")
-                self.__lmp.command("run 0")
-        else:
-            if self.__active:
-                self.__save_state()
-            self.set_parent(parent)
-            if self.__active:
-                self.__reset()
-
-            self.__lmp = self.__parent.__lmp
-            self.__prev_theta = self.get_parent_angle()
-
-            box = self.__lmp.extract_box()
-
-            par_pos = self.__parent.get_pos()
-            y_dist = self.__tip[1] - par_pos[1]
-            if self.__parent.is_head():
-                y_dist -= (Data.old_bounds[0] - par_pos[1])
-            if self.__is_tail:
-                y_dist -= (self.__tip[1] - Data.old_bounds[1])
-
-            dist = np.sqrt((self.__tip[0] - par_pos[0])**2 + y_dist**2)
-            self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
-            
-
-            try:
-                grandparent = self.__parent.get_parent()
-                del grandparent
-            except:
-                pass
-
-        self.__active = True
-        return self.energy
+        return f"|{self.__pos} {self.energy}|"

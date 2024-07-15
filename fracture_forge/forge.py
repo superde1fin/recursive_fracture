@@ -102,7 +102,7 @@ def main():
     graph = FracGraph(error = args.error, test_mode = False)
     if not os.path.isfile("path_save.csv"):
         if args.landscape is None:
-            #graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+            #graph.build(interactions = args.interactions)
             graph.build_test(interactions = args.interactions)
             graph.save()
         else:

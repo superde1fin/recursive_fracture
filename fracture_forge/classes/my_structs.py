@@ -1,15 +1,10 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
+from classes.type_sets import Holder
 import glob, os, sys, heapq, math
 import numpy as np
 import ctypes as ct
 import regex as re
-from mpi4py import MPI
-
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
-proc_self_comm = MPI.COMM_SELF
 
 class FracGraph:
     def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
@@ -97,9 +92,11 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
         self.__modify_struct()
-        node = self.attach(coords = (20, 20))
+        node = self.attach(coords = (25.315, 4.176))
         self.__head.attach(node)
-        node.attach(self.__tail)
+        node1 = self.attach(coords = (24.325, 4.106))
+        node.attach(node1)
+        node1.attach(self.__tail)
 
 
 
@@ -171,9 +168,8 @@ class FracGraph:
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         if os.path.isdir(save_dir):
-            Helper.action(os.system, f"rm -r {save_dir}")
-        Helper.action(os.mkdir, save_dir)
-        comm.Barrier()
+            os.system(f"rm -r {save_dir}")
+        os.mkdir(save_dir)
 
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
@@ -194,7 +190,7 @@ class FracGraph:
             Helper.print("-----------------------------------------------------")
             Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
             current.reset_lowest(parent_id)
-            Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "Ltid:", current.get_lmp().extract_global("current_typeset"), "TID:", current.get_tid())
+            Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "TID:", current.get_tid())
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
 
@@ -207,15 +203,11 @@ class FracGraph:
             for neighbor in neighbors:
                 if not neighbor.is_head() and neighbor.get_id() != parent_id:
                     path_energy = neighbor.activate(parent = current) - starting_pe
-                    step_eng = path_energy - energies[current]
-                    if step_eng < 0:
-                        path_energy = energies[current]
-                        step_eng = 0
                     Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
                     if path_energy < energies[neighbor]:
                         self.__paths[neighbor] = current
                         energies[neighbor] = path_energy
-                        self.__step_energies[neighbor] = step_eng
+                        self.__step_energies[neighbor] = path_energy - energies[current]
                         heapq.heappush(priority_queue, (path_energy, neighbor, current.get_id()))
             #current.deactivate()
 
@@ -226,22 +218,37 @@ class FracGraph:
 
     def __rec_path_search(self, node, path):
         to_add = (*node.get_pos(), self.__step_energies[node])
-        path.append(to_add)
-
+        if to_add in path:
+            print("Path:", path, "Node:", node)
+            raise RuntimeError("Loop in paths")
+        else:
+            path.append(to_add)
         if node.is_head():
             return
         else:
             self.__rec_path_search(self.__paths[node], path)
+    """
+
+    def __rec_path_search(self, node):
+        if node.is_head():
+            return [(*node.get_pos(), self.__step_energies[node])]
+        else:
+            ancestors = self.__rec_path_search(self.__paths[node])
+            ancestors.insert(0, (*node.get_pos(), self.__step_energies[node]))
+            return ancestors
+    """
 
     def get_paths(self):
         out = list()
         desired_rec_depth = len(self.__paths)*2
+        print("Desired recursion depth:", desired_rec_depth)
         if desired_rec_depth > sys.getrecursionlimit():
             sys.setrecursionlimit(desired_rec_depth)
         for node in self.__paths.keys():
             if node not in self.__paths.values():
                 path = list()
                 self.__rec_path_search(node, path)
+                #path = self.__rec_path_search(node)
                 if node.is_tail():
                     path[0] = (path[1][0], path[0][1], path[0][2])
                 path[-1] = (path[-2][0], path[-1][1], path[-1][2])
@@ -279,18 +286,16 @@ class FracGraph:
         groups = Data.type_groups
         ntypes = Data.initial_types
         prev_name = self.__head.structure_file
-        name = os.getcwd() + "/" + re.sub(r"(?<=.+)\.(?=[^\.]+$)", "_new.", prev_name.split("/")[-1])
-        #name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", prev_name)
-        if not os.path.isfile(name):
-            text = open(prev_name, 'r').read()
-            text = re.sub(r"(?<=\s*)\d+(?=\s+atom types)", str(ntypes*groups), text)
-            for t in range(1, ntypes + 1):
-                for g in range(groups - 1):
-                    mass_re = re.compile(fr"^{ntypes*g + t}\s+\d+\.\d+$", re.MULTILINE)
-                    mass_line = mass_re.findall(text)[-1]
-                    text = mass_re.sub(mass_line + "\n" + re.sub(r"^\d+(?=\s+)", str(t + ntypes*(g + 1)), mass_line), text)
-                    
-            open(name, "w").write(text)
+        text = open(prev_name, 'r').read()
+        text = re.sub(r"(?<=\s*)\d+(?=\s+atom types)", str(ntypes*groups), text)
+        name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", prev_name)
+        for t in range(1, ntypes + 1):
+            for g in range(groups - 1):
+                mass_re = re.compile(fr"^{ntypes*g + t}\s+\d+\.\d+$", re.MULTILINE)
+                mass_line = mass_re.findall(text)[-1]
+                text = mass_re.sub(mass_line + "\n" + re.sub(r"^\d+(?=\s+)", str(t + ntypes*(g + 1)), mass_line), text)
+                
+        open(name, "w").write(text)
         self.__head.structure_file = name
 
         
@@ -306,39 +311,38 @@ class FracGraph:
             for i in range(len(interactions)):
                 interactions.append(interactions[i][::-1])
             
-        name = os.getcwd() + "/" + re.sub(r"(?<=.+)\.(?=[^\.]+$)", "_new.", self.__head.potfile.split("/")[-1])
-        if not os.path.isfile(name):
-            text = open(self.__head.potfile, 'r').read()
-            new_potfile = open(name, 'w')
-            new_text = text + "\n\n#-------------------------\n\n"
-            for t in range(1, ntypes + 1):
-                for g in range(groups - 1):
-                    mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
-                    mass_line = mass_re.findall(new_text)[-1]
-                    new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
+        text = open(self.__head.potfile, 'r').read()
+        name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", self.__head.potfile)
+        new_potfile = open(name, 'w')
+        new_text = text + "\n\n#-------------------------\n\n"
+        for t in range(1, ntypes + 1):
+            for g in range(groups - 1):
+                mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
+                mass_line = mass_re.findall(new_text)[-1]
+                new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
 
 
-                    for j in range(t, ntypes + 1):
-                        coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
-                        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
+                for j in range(t, ntypes + 1):
+                    coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
+                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
 
 
-                        for group_iter in range(g + 2, groups + 1):
-                            if (g + 1, group_iter) in interactions:
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
-                                if t != j:
-                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
-                            else:
-                                tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
-                                if t != j:
-                                    tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
-                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
-                    
-            general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
-            type_names = general_type_re.search(new_text).group()*groups
-            new_text = general_type_re.sub(type_names, new_text)
-            new_potfile.write(new_text)
+                    for group_iter in range(g + 2, groups + 1):
+                        if (g + 1, group_iter) in interactions:
+                            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                            if t != j:
+                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                        else:
+                            tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
+                            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                            if t != j:
+                                tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
+                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                
+        general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
+        type_names = general_type_re.search(new_text).group()*groups
+        new_text = general_type_re.sub(type_names, new_text)
+        new_potfile.write(new_text)
 
         self.__head.potfile = name
 
@@ -361,12 +365,11 @@ class Node:
             self.__units = units
             if test_mode:
                 if os.path.isdir("logs"):
-                    Helper.action(os.system, "rm -r logs")
-                Helper.action(os.mkdir, "logs")
-                comm.Barrier()
-                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{rank}.lammps"], comm = proc_self_comm)
+                    os.system("rm -r logs")
+                os.mkdir("logs")
+                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.0.lammps"])
             else:
-                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"], comm = proc_self_comm)
+                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
             self.__system_parameters_initialization(units = units)
             self.__lmp.command(f"timestep {timestep}")
             if Data.structure_file:
@@ -380,7 +383,7 @@ class Node:
             else:
                 name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
                 self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
-            self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}")
+            self.type_holder = Holder(self.__lmp)
             
 
     #Setters
@@ -401,8 +404,8 @@ class Node:
 
     def set_parent(self, node):
         if node:
-            if node.__lmp.extract_global("ntype_sets"):
-                node.__lmp.change_typeset(node.__typeset_id)
+            if node.type_holder.get_ntype_sets():
+                node.type_holder.change_typeset(node.__typeset_id)
             node_pos = node.get_pos()
             if not (self.__tip[0] - node_pos[0]):
                 if self.__tip[1] > node_pos[1]:
@@ -430,11 +433,6 @@ class Node:
         self.__parent = node
 
 
-
-    def deactivate(self):
-        if self.__active and not self.__is_head and self.__lmp.extract_global("current_typeset") != self.__typeset_id:
-            self.__active = False
-            self.__lmp.delete_typeset(self.__typeset_id)
 
     #Getters
     def get_parent_angle(self):
@@ -489,13 +487,6 @@ class Node:
     def is_active(self):
         return self.__active
 
-    def path_back(self):
-        if self.__theta + np.pi ==  self.__prev_theta:
-            return True
-        if self.__theta - np.pi == self.__prev_theta:
-            return True
-        return False
-
     #Built-in reassignment
     def __str__(self):
         return f"id: {self.__id}, position: {self.get_pos()}"
@@ -526,18 +517,18 @@ class Node:
 
     def reset_lowest(self, parent_id):
         if not self.is_head():
-            self.__lmp.change_typeset(self.__typeset_id)
+            self.type_holder.change_typeset(self.__typeset_id)
             prev_tid = self.__typeset_id
             for pid in self.__versions.keys():
                 if pid == parent_id:
                     self.__typeset_id, self.__surface_area, self.__theta = self.__versions[parent_id]
                     Helper.print("Going back to type set:", self.__typeset_id)
-                    self.__lmp.change_typeset(self.__typeset_id)
+                    self.type_holder.change_typeset(self.__typeset_id)
                     Helper.print("Removing type set:", prev_tid)
-                    self.__lmp.delete_typeset(prev_tid)
+                    self.type_holder.delete_typeset(prev_tid)
                 else:
                     Helper.print("Removing type set:",self.__versions[pid][0])
-                    self.__lmp.delete_typeset(self.__versions[pid][0])
+                    self.type_holder.delete_typeset(self.__versions[pid][0])
             self.__versions = dict()
 
 
@@ -579,6 +570,7 @@ class Node:
                 self.__reset()
 
             self.__lmp = self.__parent.get_lmp()
+            self.type_holder = self.__parent.type_holder
             self.__prev_theta = self.get_parent_angle()
 
             box = self.__lmp.extract_box()
@@ -597,11 +589,11 @@ class Node:
             types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
             self.box_side = box[1][0] - box[0][0]
 
-            old_tid = self.__lmp.extract_global("current_typeset")
+            old_tid = self.type_holder.get_current()
 
             new_types = self.__new_types(my_atoms, types, self.__lmp.get_natoms())
-            self.__typeset_id = self.__lmp.add_typeset(new_types)
-            self.__lmp.change_typeset(self.__typeset_id)
+            self.__typeset_id = self.type_holder.add_typeset(new_types)
+            self.type_holder.change_typeset(self.__typeset_id)
             Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}")
             
 
@@ -622,7 +614,7 @@ class Node:
         new_types_lst = list()
         for i in range(natoms):
             float_pos = my_atoms[i]
-            group = self.__near_surface(float_pos[:-1], prev_node = prev_node)
+            group = self.__near_surface(float_pos[:-1], prev_node = prev_node, i = i)
             if types[i] <= Data.initial_types:
                 if group <= Data.type_groups:
                     new_type = types[i] + (group - 1)*Data.initial_types
@@ -643,12 +635,17 @@ class Node:
                 else:
                     new_type = types[i]
 
+            """
+            #Testing
+            if i + 1 == 3128:
+                print("Group:", group, "New type:", new_type)
+            """
             new_types_lst.append(new_type)
         return new_types_lst
 
 
 
-    def __near_surface(self, atom_pos, prev_node):
+    def __near_surface(self, atom_pos, prev_node, i = 0):
         cutoff = Data.non_inter_cutoff
         x0, y0 = self.__tip #Tip of the division vector
 
@@ -680,6 +677,12 @@ class Node:
 
         #Line through point (x1, y1) at angle perpendicular to prev_theta
         f99 = np.poly1d([np.tan(self.__prev_theta + np.pi/2), y1 - x1*np.tan(self.__prev_theta + np.pi/2)])
+
+        """
+        #Testing
+        if i + 1 == 3128:
+            Helper.print("TESTING || Prev T:", self.__prev_theta, "Theta:", self.__theta, "Node pos:", (x0, y0), "Parent pos:", (x1, y1), "Atom pos:", atom_pos)
+        """
 
         for x in [atom_pos[0], self.box_side + atom_pos[0], atom_pos[0] - self.box_side]:
         #for x in [atom_pos[0]]:
@@ -880,8 +883,19 @@ class Node:
             if angle_diff >= -np.pi/2 and angle_diff <= np.pi/2:
                 behind_curr = True
 
+            """
+            #Testing
+            if i + 1 == 3128:
+                print("AP:", ahead_prev, "BC:", behind_curr, "PHI:", phi, "D:", angle_diff)
+                print(np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) , (self.__theta - self.__prev_theta != np.pi), (self.__prev_theta - self.__theta != np.pi))
+            """
 
             if ahead_prev and behind_curr and (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < cutoff) and (self.__theta - self.__prev_theta != np.pi) and (self.__prev_theta - self.__theta != np.pi):
+                """
+                #Testing
+                if i + 1 == 3128:
+                    print("IN")
+                """
                 if self.__theta > self.__prev_theta and self.__theta < self.__prev_theta + np.pi or self.__theta < self.__prev_theta - np.pi:
                     res = 3
                     if res <= Data.type_groups:
@@ -895,5 +909,10 @@ class Node:
 
 
         res = 1
+        """
+        #Testing
+        if i == 3128 and self.__id == 3:
+            print(res)
+        """
         if res <= Data.type_groups:
             return res

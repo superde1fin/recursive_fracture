@@ -1,13 +1,13 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys
+import glob, os, sys, heapq, math
 import numpy as np
 import ctypes as ct
 import regex as re
-import heapq
 
 class FracGraph:
     def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
+        self.__step_energies = dict()
         self.__dr = connection_radius
         self.__test_mode = test_mode
         self.__head = Node(is_head = True, test_mode = self.__test_mode)
@@ -48,6 +48,9 @@ class FracGraph:
         self.__node_hash = {self.__head.get_pos() : self.__head, self.__tail.get_pos() : self.__tail}
 
     #Getters
+    def get_eng_bounds(self):
+        return max(self.__step_energies.values()), min(self.__step_energies.values())
+
     def get_box(self):
         atom_box = tuple(self.__box)
         atom_box[0][1] = Data.old_bounds[0]
@@ -88,11 +91,9 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
         self.__modify_struct()
-        node = self.attach(coords = (25.315, 4.176))
+        node = self.attach(coords = (20, 20))
         self.__head.attach(node)
-        node1 = self.attach(coords = (24.325, 4.106))
-        node.attach(node1)
-        node1.attach(self.__tail)
+        node.attach(self.__tail)
 
 
 
@@ -173,6 +174,7 @@ class FracGraph:
 
         energies = {node : float("inf") for node in self.flatten()}
         energies[self.__head] = 0
+        self.__step_energies[self.__head] = 0
 
         priority_queue = [(0, self.__head, None)]
         scan_ctr = 0
@@ -198,10 +200,15 @@ class FracGraph:
             for neighbor in neighbors:
                 if not neighbor.is_head() and neighbor.get_id() != parent_id:
                     path_energy = neighbor.activate(parent = current) - starting_pe
+                    step_eng = path_energy - energies[current]
+                    if step_eng < 0:
+                        path_energy = energies[current]
+                        step_eng = 0
                     Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
                     if path_energy < energies[neighbor]:
                         self.__paths[neighbor] = current
                         energies[neighbor] = path_energy
+                        self.__step_energies[neighbor] = step_eng
                         heapq.heappush(priority_queue, (path_energy, neighbor, current.get_id()))
             #current.deactivate()
 
@@ -210,27 +217,33 @@ class FracGraph:
         self.__head.reset_tip()
         return float("inf")
 
-    def __rec_path_search(self, node):
+    def __rec_path_search(self, node, path):
+        to_add = (*node.get_pos(), self.__step_energies[node])
+        path.append(to_add)
+
         if node.is_head():
-            return [node.get_pos()]
+            return
         else:
-            ancestors = self.__rec_path_search(self.__paths[node])
-            ancestors.insert(0, node.get_pos())
-            return ancestors
+            self.__rec_path_search(self.__paths[node], path)
 
     def get_paths(self):
         out = list()
+        desired_rec_depth = len(self.__paths)*2
+        if desired_rec_depth > sys.getrecursionlimit():
+            sys.setrecursionlimit(desired_rec_depth)
         for node in self.__paths.keys():
             if node not in self.__paths.values():
-                path = self.__rec_path_search(node)
+                path = list()
+                self.__rec_path_search(node, path)
                 if node.is_tail():
-                    path[0] = (path[1][0], path[0][1])
-                path[-1] = (path[-2][0], path[-1][1])
+                    path[0] = (path[1][0], path[0][1], path[0][2])
+                path[-1] = (path[-2][0], path[-1][1], path[-1][2])
                 out.append(path)
 
         sorted_paths = sorted(out, key = lambda node_lst : len(node_lst), reverse = True)
-        max_length = len(sorted_paths[0])
-        return list(filter(lambda x: len(x)/max_length > 0.8, sorted_paths))
+        return sorted_paths
+        #max_length = len(sorted_paths[0])
+        #return list(filter(lambda x: len(x)/max_length > 0.8, sorted_paths))
 
 
     def attach(self, coords):
@@ -259,16 +272,18 @@ class FracGraph:
         groups = Data.type_groups
         ntypes = Data.initial_types
         prev_name = self.__head.structure_file
-        text = open(prev_name, 'r').read()
-        text = re.sub(r"(?<=\s*)\d+(?=\s+atom types)", str(ntypes*groups), text)
-        name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", prev_name)
-        for t in range(1, ntypes + 1):
-            for g in range(groups - 1):
-                mass_re = re.compile(fr"^{ntypes*g + t}\s+\d+\.\d+$", re.MULTILINE)
-                mass_line = mass_re.findall(text)[-1]
-                text = mass_re.sub(mass_line + "\n" + re.sub(r"^\d+(?=\s+)", str(t + ntypes*(g + 1)), mass_line), text)
-                
-        open(name, "w").write(text)
+        name = os.getcwd() + "/" + re.sub(r"(?<=.+)\.(?=[^\.]+$)", "_new.", prev_name.split("/")[-1])
+        #name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", prev_name)
+        if not os.path.isfile(name):
+            text = open(prev_name, 'r').read()
+            text = re.sub(r"(?<=\s*)\d+(?=\s+atom types)", str(ntypes*groups), text)
+            for t in range(1, ntypes + 1):
+                for g in range(groups - 1):
+                    mass_re = re.compile(fr"^{ntypes*g + t}\s+\d+\.\d+$", re.MULTILINE)
+                    mass_line = mass_re.findall(text)[-1]
+                    text = mass_re.sub(mass_line + "\n" + re.sub(r"^\d+(?=\s+)", str(t + ntypes*(g + 1)), mass_line), text)
+                    
+            open(name, "w").write(text)
         self.__head.structure_file = name
 
         
@@ -284,38 +299,39 @@ class FracGraph:
             for i in range(len(interactions)):
                 interactions.append(interactions[i][::-1])
             
-        text = open(self.__head.potfile, 'r').read()
-        name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", self.__head.potfile)
-        new_potfile = open(name, 'w')
-        new_text = text + "\n\n#-------------------------\n\n"
-        for t in range(1, ntypes + 1):
-            for g in range(groups - 1):
-                mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
-                mass_line = mass_re.findall(new_text)[-1]
-                new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
+        name = os.getcwd() + "/" + re.sub(r"(?<=.+)\.(?=[^\.]+$)", "_new.", self.__head.potfile.split("/")[-1])
+        if not os.path.isfile(name):
+            text = open(self.__head.potfile, 'r').read()
+            new_potfile = open(name, 'w')
+            new_text = text + "\n\n#-------------------------\n\n"
+            for t in range(1, ntypes + 1):
+                for g in range(groups - 1):
+                    mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
+                    mass_line = mass_re.findall(new_text)[-1]
+                    new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
 
 
-                for j in range(t, ntypes + 1):
-                    coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
-                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
+                    for j in range(t, ntypes + 1):
+                        coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
+                        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
 
 
-                    for group_iter in range(g + 2, groups + 1):
-                        if (g + 1, group_iter) in interactions:
-                            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
-                            if t != j:
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
-                        else:
-                            tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
-                            new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
-                            if t != j:
-                                tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
-                
-        general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
-        type_names = general_type_re.search(new_text).group()*groups
-        new_text = general_type_re.sub(type_names, new_text)
-        new_potfile.write(new_text)
+                        for group_iter in range(g + 2, groups + 1):
+                            if (g + 1, group_iter) in interactions:
+                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                                if t != j:
+                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                            else:
+                                tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
+                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                                if t != j:
+                                    tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
+                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                    
+            general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
+            type_names = general_type_re.search(new_text).group()*groups
+            new_text = general_type_re.sub(type_names, new_text)
+            new_potfile.write(new_text)
 
         self.__head.potfile = name
 
@@ -356,6 +372,7 @@ class Node:
             else:
                 name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
                 self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
+            self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}")
             
 
     #Setters
@@ -463,6 +480,13 @@ class Node:
 
     def is_active(self):
         return self.__active
+
+    def path_back(self):
+        if self.__theta + np.pi ==  self.__prev_theta:
+            return True
+        if self.__theta - np.pi == self.__prev_theta:
+            return True
+        return False
 
     #Built-in reassignment
     def __str__(self):

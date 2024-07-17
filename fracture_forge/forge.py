@@ -2,8 +2,10 @@ import  os, sys, argparse, ast
 from classes.Storage import Data, SystemParams, Helper
 from classes.my_structs import FracGraph
 import numpy as np
+import pandas as pd
 
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 
 
 def draw_arcs(nodes, alpha, R):
@@ -31,6 +33,31 @@ def draw_lines(nodes):
             plt.plot(line_x, line_y, color = "red")
 
 
+def get_RGB(eng, min_eng, max_eng):
+    norm_eng = (eng - min_eng)/(max_eng - min_eng)
+    if norm_eng < 0:
+        norm_eng = 0
+    if norm_eng > 1:
+        norm_eng = 1
+    if norm_eng <= 0.5:
+        RGB = (2*norm_eng, 1, 0)
+    else:
+        RGB = (1, 2 * (1 - norm_eng), 0)
+
+    return RGB
+
+def create_gradient(color1, color2, num_segments):
+    return [(color1[0] * (1 - t) + color2[0] * t,
+             color1[1] * (1 - t) + color2[1] * t,
+             color1[2] * (1 - t) + color2[2] * t)
+            for t in np.linspace(0, 1, num_segments)]
+
+def generate_segments(x, y):
+    points = np.array([x, y]).T.reshape(-1, 1, 2)
+    return np.concatenate([points[:-1], points[1:]], axis = 1)
+
+
+
 def color_paths(graph):
     if not os.path.isfile("path_save.csv"):
         paths = graph.get_paths()
@@ -40,33 +67,69 @@ def color_paths(graph):
     else:
         writing = False
         file = open("path_save.csv", "r")
-        paths = [[ast.literal_eval(pos.strip()) for pos in line.split('|')] for line in file.readlines()]
+        custom_globals = {"np" : np}
+        file_lines = file.readlines()
+        paths = list()
+        for line in file_lines:
+            path = list()
+            for pos in line.split('|'):
+                pos_tuple = eval(pos.strip(), {"__builtins__" : None}, custom_globals)
+                path.append(pos_tuple)
+            paths.append(path)
+
+                
+        #paths = [[eval(pos.strip(), {"__builtins__" : None}, custom_globals) for pos in line.split('|')] for line in file_lines[:-1]]
         file.close()
 
+    unique_nodes = pd.unique(pd.DataFrame(paths).values.ravel())
+    print(*unique_nodes, sep = "\n")
+    num_unique = len(unique_nodes)
+    energies = np.array([tup[2] for tup in unique_nodes if tup])
+    min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
+    
+    box = graph.get_box()
+    segments_per_cut = 100
     num_paths = len(paths)
+    visited = list()
+    ax = plt.gca()
+    main_path_offset = 1
     for npi, path in enumerate(paths):
+        print(f"Colored {round(100*npi/(num_paths - 1), 2)}% of paths")
         parent_pos = path[0]
         i = 1
         num_nodes = len(path)
         if writing:
             text += "|".join(map(str, path)) + "\n"
+        if parent_pos[1] > box[1][1]:
+            plt.plot([node[0] for node in path], [node[1] for node in path], color = (0.5, 0.5, 0.5, 0.2), linewidth = 3)
+
         while i < num_nodes:
             node_pos = parent_pos
             parent_pos = path[i]
+            if node_pos in visited:
+                i += 1
+                continue
             if node_pos[0] - parent_pos[0]:
                 tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
-                line_x = np.linspace(parent_pos[0], node_pos[0], 100)
+                line_x = np.linspace(parent_pos[0], node_pos[0], segments_per_cut)
                 line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
             else:
-                line_x = [node_pos[0], node_pos[0]]
-                line_y = [parent_pos[1], node_pos[1]]
+                line_x = [node_pos[0]]*segments_per_cut
+                line_y = np.linspace(parent_pos[1], node_pos[1], segments_per_cut)
 
-            if num_paths - 1:
-                plt.plot(line_x, line_y, color = (npi/(num_paths - 1), 1 - npi/(num_paths - 1) , 0))
-            else:
-                plt.plot(line_x, line_y, color = (0, 1, 0))
+            node_RGB = get_RGB(node_pos[2], min_eng, max_eng)
+            parent_RGB = get_RGB(parent_pos[2], min_eng, max_eng)
+            colors = create_gradient(parent_RGB, node_RGB, int(segments_per_cut/2))
+            colors += [node_RGB]*(segments_per_cut - int(segments_per_cut/2))
+            #colors = create_gradient(parent_RGB, node_RGB, segments_per_cut)
+            lc = LineCollection(generate_segments(line_x, line_y), colors = colors, linewidth = 0.5, capstyle = "round", alpha = 0.5)
+            ax.add_collection(lc)
+            #plt.plot(line_x, line_y, color = (node_RGB))
+
+            visited.append(node_pos)
             
             i += 1
+        final_path = False
     if writing:
         file.write(text)
         file.close()
@@ -94,7 +157,8 @@ def visualize(graph, dr, dtheta):
     #plt.plot(x, y, marker = 'o', linestyle = 'None', color = "black")
     ax = plt.gca()
     ax.set_aspect("equal", adjustable = "box")
-    plt.savefig("energy_landscape.png")
+    ax.axis("off")
+    plt.savefig("energy_landscape.png", dpi = 300)
     plt.show()
 
 def parser_call():
@@ -138,8 +202,8 @@ def parser_call():
 
 def main():
     args = parser_call()
-    Data.structure_file = args.structure
-    Data.potfile = args.force_field
+    Data.structure_file = os.path.abspath(args.structure)
+    Data.potfile = os.path.abspath(args.force_field)
     Data.non_inter_cutoff = args.width
 
     graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)

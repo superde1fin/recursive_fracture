@@ -202,11 +202,12 @@ def parser_call():
 
 def main():
     args = parser_call()
-    Data.structure_file = os.path.abspath(args.structure)
-    Data.potfile = os.path.abspath(args.force_field)
+    Data.structure_file = args.structure
+    Data.potfile = args.force_field
     Data.non_inter_cutoff = args.width
 
-    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
+    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = True, simulation_temp = args.temperature, connection_radius = args.radius)
+    """
     if not os.path.isfile("path_save.csv"):
         graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
         #graph.build_test(interactions = args.interactions)
@@ -220,6 +221,7 @@ def main():
         Helper.print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 
     visualize(graph, args.radius, args.angle)
+    """
 
 
 

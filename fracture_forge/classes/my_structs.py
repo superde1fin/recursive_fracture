@@ -4,6 +4,12 @@ import glob, os, sys, heapq, math
 import numpy as np
 import ctypes as ct
 import regex as re
+from mpi4py import MPI
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+proc_self_comm = MPI.COMM_SELF
 
 class FracGraph:
     def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
@@ -165,8 +171,9 @@ class FracGraph:
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         if os.path.isdir(save_dir):
-            os.system(f"rm -r {save_dir}")
-        os.mkdir(save_dir)
+            Helper.action(os.system, f"rm -r {save_dir}")
+        Helper.action(os.mkdir, save_dir)
+        comm.Barrier()
 
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
@@ -354,11 +361,12 @@ class Node:
             self.__units = units
             if test_mode:
                 if os.path.isdir("logs"):
-                    os.system("rm -r logs")
-                os.mkdir("logs")
-                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.0.lammps"])
+                    Helper.action(os.system, "rm -r logs")
+                Helper.action(os.mkdir, "logs")
+                comm.Barrier()
+                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{rank}.lammps"], comm = proc_self_comm)
             else:
-                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"])
+                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"], comm = proc_self_comm)
             self.__system_parameters_initialization(units = units)
             self.__lmp.command(f"timestep {timestep}")
             if Data.structure_file:
@@ -614,7 +622,7 @@ class Node:
         new_types_lst = list()
         for i in range(natoms):
             float_pos = my_atoms[i]
-            group = self.__near_surface(float_pos[:-1], prev_node = prev_node, i = i)
+            group = self.__near_surface(float_pos[:-1], prev_node = prev_node)
             if types[i] <= Data.initial_types:
                 if group <= Data.type_groups:
                     new_type = types[i] + (group - 1)*Data.initial_types
@@ -635,17 +643,12 @@ class Node:
                 else:
                     new_type = types[i]
 
-            """
-            #Testing
-            if i + 1 == 3128:
-                print("Group:", group, "New type:", new_type)
-            """
             new_types_lst.append(new_type)
         return new_types_lst
 
 
 
-    def __near_surface(self, atom_pos, prev_node, i = 0):
+    def __near_surface(self, atom_pos, prev_node):
         cutoff = Data.non_inter_cutoff
         x0, y0 = self.__tip #Tip of the division vector
 
@@ -677,12 +680,6 @@ class Node:
 
         #Line through point (x1, y1) at angle perpendicular to prev_theta
         f99 = np.poly1d([np.tan(self.__prev_theta + np.pi/2), y1 - x1*np.tan(self.__prev_theta + np.pi/2)])
-
-        """
-        #Testing
-        if i + 1 == 3128:
-            Helper.print("TESTING || Prev T:", self.__prev_theta, "Theta:", self.__theta, "Node pos:", (x0, y0), "Parent pos:", (x1, y1), "Atom pos:", atom_pos)
-        """
 
         for x in [atom_pos[0], self.box_side + atom_pos[0], atom_pos[0] - self.box_side]:
         #for x in [atom_pos[0]]:
@@ -883,19 +880,8 @@ class Node:
             if angle_diff >= -np.pi/2 and angle_diff <= np.pi/2:
                 behind_curr = True
 
-            """
-            #Testing
-            if i + 1 == 3128:
-                print("AP:", ahead_prev, "BC:", behind_curr, "PHI:", phi, "D:", angle_diff)
-                print(np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) , (self.__theta - self.__prev_theta != np.pi), (self.__prev_theta - self.__theta != np.pi))
-            """
 
             if ahead_prev and behind_curr and (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < cutoff) and (self.__theta - self.__prev_theta != np.pi) and (self.__prev_theta - self.__theta != np.pi):
-                """
-                #Testing
-                if i + 1 == 3128:
-                    print("IN")
-                """
                 if self.__theta > self.__prev_theta and self.__theta < self.__prev_theta + np.pi or self.__theta < self.__prev_theta - np.pi:
                     res = 3
                     if res <= Data.type_groups:
@@ -909,10 +895,5 @@ class Node:
 
 
         res = 1
-        """
-        #Testing
-        if i == 3128 and self.__id == 3:
-            print(res)
-        """
         if res <= Data.type_groups:
             return res

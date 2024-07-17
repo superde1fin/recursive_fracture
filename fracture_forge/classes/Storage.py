@@ -54,3 +54,9 @@ class Helper:
     def convert_timestep(lmp, step): #ns  - step
         return int((step*1e-9)/(lmp.eval("dt")*Data.units_data[SystemParams.parameters["units"]]["timestep"]))
 
+    @staticmethod
+    def action(command, *args, **kwargs):
+        if MPI.COMM_WORLD.Get_rank() == Helper.action_proc:
+            return command(*args, **kwargs)
+        else:
+            return None

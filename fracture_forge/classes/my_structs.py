@@ -5,6 +5,7 @@ import numpy as np
 import ctypes as ct
 import regex as re
 from mpi4py import MPI
+from classes.type_sets import Holder
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -194,7 +195,7 @@ class FracGraph:
             Helper.print("-----------------------------------------------------")
             Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
             current.reset_lowest(parent_id)
-            Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "Ltid:", current.get_lmp().extract_global("current_typeset"), "TID:", current.get_tid())
+            Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "TID:", current.get_tid())
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
             scan_ctr += 1
 
@@ -381,6 +382,7 @@ class Node:
                 name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
                 self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
             self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}")
+            self.type_holder = Holder(self.__lmp)
             
 
     #Setters
@@ -401,8 +403,8 @@ class Node:
 
     def set_parent(self, node):
         if node:
-            if node.__lmp.extract_global("ntype_sets"):
-                node.__lmp.change_typeset(node.__typeset_id)
+            if node.type_holder.get_ntype_sets():
+                node.type_holder.change_typeset(node.__typeset_id)
             node_pos = node.get_pos()
             if not (self.__tip[0] - node_pos[0]):
                 if self.__tip[1] > node_pos[1]:
@@ -428,13 +430,6 @@ class Node:
 
             #Helper.print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
         self.__parent = node
-
-
-
-    def deactivate(self):
-        if self.__active and not self.__is_head and self.__lmp.extract_global("current_typeset") != self.__typeset_id:
-            self.__active = False
-            self.__lmp.delete_typeset(self.__typeset_id)
 
     #Getters
     def get_parent_angle(self):
@@ -526,18 +521,18 @@ class Node:
 
     def reset_lowest(self, parent_id):
         if not self.is_head():
-            self.__lmp.change_typeset(self.__typeset_id)
+            self.type_holder.change_typeset(self.__typeset_id)
             prev_tid = self.__typeset_id
             for pid in self.__versions.keys():
                 if pid == parent_id:
                     self.__typeset_id, self.__surface_area, self.__theta = self.__versions[parent_id]
                     Helper.print("Going back to type set:", self.__typeset_id)
-                    self.__lmp.change_typeset(self.__typeset_id)
+                    self.type_holder.change_typeset(self.__typeset_id)
                     Helper.print("Removing type set:", prev_tid)
-                    self.__lmp.delete_typeset(prev_tid)
+                    self.type_holder.delete_typeset(prev_tid)
                 else:
                     Helper.print("Removing type set:",self.__versions[pid][0])
-                    self.__lmp.delete_typeset(self.__versions[pid][0])
+                    self.type_holder.delete_typeset(self.__versions[pid][0])
             self.__versions = dict()
 
 
@@ -579,6 +574,7 @@ class Node:
                 self.__reset()
 
             self.__lmp = self.__parent.get_lmp()
+            self.type_holder = self.__parent.type_holder
             self.__prev_theta = self.get_parent_angle()
 
             box = self.__lmp.extract_box()
@@ -597,11 +593,11 @@ class Node:
             types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
             self.box_side = box[1][0] - box[0][0]
 
-            old_tid = self.__lmp.extract_global("current_typeset")
+            old_tid = self.type_holder.get_current()
 
             new_types = self.__new_types(my_atoms, types, self.__lmp.get_natoms())
-            self.__typeset_id = self.__lmp.add_typeset(new_types)
-            self.__lmp.change_typeset(self.__typeset_id)
+            self.__typeset_id = self.type_holder.add_typeset(new_types)
+            self.type_holder.change_typeset(self.__typeset_id)
             Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}")
             
 

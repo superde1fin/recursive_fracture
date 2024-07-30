@@ -1,4 +1,4 @@
-import sys, os, shutil
+import sys, os, shutil, functools
 from mpi4py import MPI
 
 class Data:
@@ -60,3 +60,13 @@ class Helper:
             return command(*args, **kwargs)
         else:
             return None
+
+    @staticmethod
+    def linear_func(func):
+        @functools.wraps(func)
+        def decorator(*args, **kwargs):
+            if MPI.COMM_WORLD.Get_rank() == 0:
+                return func(*args, **kwargs)
+            else:
+                return None
+        return decorator

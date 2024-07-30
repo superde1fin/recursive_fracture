@@ -7,6 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
+@Helper.linear_func
 def get_RGB(eng, min_eng, max_eng):
     norm_eng = (eng - min_eng)/(max_eng - min_eng)
     if norm_eng < 0:
@@ -20,18 +21,20 @@ def get_RGB(eng, min_eng, max_eng):
 
     return RGB
 
+@Helper.linear_func
 def create_gradient(color1, color2, num_segments):
     return [(color1[0] * (1 - t) + color2[0] * t,
              color1[1] * (1 - t) + color2[1] * t,
              color1[2] * (1 - t) + color2[2] * t)
             for t in np.linspace(0, 1, num_segments)]
 
+@Helper.linear_func
 def generate_segments(x, y):
     points = np.array([x, y]).T.reshape(-1, 1, 2)
     return np.concatenate([points[:-1], points[1:]], axis = 1)
 
 
-
+@Helper.linear_func
 def color_paths(graph):
     if not os.path.isfile("path_save.csv"):
         paths = graph.get_paths()
@@ -55,7 +58,6 @@ def color_paths(graph):
         file.close()
 
     unique_nodes = pd.unique(pd.DataFrame(paths).values.ravel())
-    #print(*unique_nodes, sep = "\n")
     num_unique = len(unique_nodes)
     energies = np.array([tup[2] for tup in unique_nodes if tup])
     min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
@@ -107,12 +109,15 @@ def color_paths(graph):
 
 
 
+@Helper.linear_func
 def visualize(graph, dr, dtheta):
+    """
     nodes = graph.flatten()
     points = np.array([node.get_pos() for node in nodes])
 
     x = points[:, 0]
     y = points[:, 1]
+    """
 
     color_paths(graph)
 
@@ -178,14 +183,14 @@ def main():
     if not os.path.isfile("path_save.csv"):
         graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
         #graph.build_test(interactions = args.interactions)
-        print("Number of nodes created:", len(graph))
+        Helper.mpi_print("Number of nodes created:", len(graph))
 
 
         data_dir = "out_files" 
         res = 0.69*graph.calculate(data_dir)
-        print("G:", res)
+        Helper.mpi_print("G:", res)
     else:
-        Helper.print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
+        Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 
     visualize(graph, args.radius, args.angle)
 

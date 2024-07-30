@@ -1,6 +1,6 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys, heapq, math
+import glob, os, sys, heapq, math, pickle
 import numpy as np
 import ctypes as ct
 import regex as re
@@ -22,6 +22,7 @@ class FracGraph:
         self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1)
         self.__node_ctr = 2
         self.__paths = dict()
+        self.__id_node_map = list()
         self.__grid_size = error/np.sqrt(2)
         if self.__dr < self.__grid_size:
             self.__dr = self.__grid_size*1.5
@@ -53,6 +54,8 @@ class FracGraph:
         self.__head.set_tip(start_pos)
         self.__tail.set_tip((x_side/2 + box[0][0], Data.old_bounds[1] + start_buffer))
         self.__node_hash = {self.__head.get_pos() : self.__head, self.__tail.get_pos() : self.__tail}
+        self.__id_node_map.append(self.__head)
+        self.__id_node_map.append(self.__tail)
 
     #Getters
     def get_eng_bounds(self):
@@ -171,6 +174,44 @@ class FracGraph:
             self.__tail.attach(tail_neigh)
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
+        def dijkstra_step(energies, current_node, scan_ctr):
+            scan_ctr = scan_ctr*size + rank
+
+            current = self.__id_node_map[current_node["node_id"]]
+
+            if current_energy > energies[current_node["node_id"]]:
+                return list()
+
+            Helper.print("-----------------------------------------------------")
+            Helper.print("Lowest node:", current_node["node_id"], "Eng:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current.get_pos())
+            current.reset_lowest(current_node["typeset_id"], current_node["parent_rank"], current_node["typeset_list"], current_node["surface_area"], current_node["theta"])
+            Helper.print("Saving datafile for node:", current_node["node_id"], "Ctr:", scan_ctr, "TID:", current.get_tid())
+            current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
+
+            if current.is_tail():
+                self.__tail.reset_tip()
+                self.__head.reset_tip()
+                return current_energy/current.get_surface_area()
+
+            new_nodes = list()
+            neighbors = current.get_neighbors()
+            for neighbor in neighbors:
+                neigh_id = neighbor.get_id()
+                if not neighbor.is_head() and neigh_id != current_node["parent_id"]:
+                    path_energy = neighbor.activate(parent = current) - starting_pe
+                    step_eng = path_energy - energies[current_node["node_id"]]
+                    if step_eng < 0:
+                        path_energy = energies[current_node["node_id"]]
+                        step_eng = 0
+                    Helper.print("Looking at node:", neigh_id, "Eng:", path_energy, "Pos:", neighbor.get_pos())
+                    if path_energy < energies[neigh_id]:
+                        self.__paths[neigh_id] = (current_node["node_id"], path_energy)
+                        energies[neigh_id] = path_energy
+                        self.__step_energies[neighbor_id] = (step_eng, path_energy)
+                        new_nodes.append({"path_energy" : path_energy, "node_id" : neigh_id, "typeset_id" : neighbor.get_tid(), "parent_rank" : rank, "parent_id" : current_id, "typeset_list" : neighbor.get_typeset_list(), "surface_area" : neighbor.get_surface_area(), "theta" : neighbor.get_theta()})
+            return new_nodes
+
+
         if os.path.isdir(save_dir):
             Helper.action(os.system, f"rm -r {save_dir}")
         Helper.action(os.mkdir, save_dir)
@@ -180,70 +221,121 @@ class FracGraph:
         self.__save_dir = save_dir
         starting_pe = self.__head.activate()
 
-        energies = {node : float("inf") for node in self.flatten()}
-        energies[self.__head] = 0
         self.__step_energies[self.__head] = 0
 
-        priority_queue = [(0, self.__head, None)]
         scan_ctr = 0
-        while priority_queue:
-            current_energy, current, parent_id = heapq.heappop(priority_queue)
+        if rank == 0:
+            energies = {node : float("inf") for node in self.flatten()}
+            head = self.__head
+            energies[head.get_id()] = 0
+            priority_queue = [(0, head.get_id(), None, head.get_tid(), rank, head.get_surface_area(), head.get_theta())]
+            done = False
+            while priority_queue and not done:
+                own_node = heapq.heappop(priority_queue)
+                heap_ctr = 1
+                heap_size = len(priority_queue)
+                while heap_ctr < heap_size and heap_ctr < size:
+                    current_node = heapq.heappop(priority_queue)
+                    comm.send(pickle.dumps(energies), dest = heap_ctr, tag = 0)
+                    comm.send(pickle.dumps(current_node), dest = heap_ctr, tag = 1)
+                    heap_ctr += 1
 
-            if current_energy > energies[current]:
-                continue
+                to_add = dijkstra_step(energies, own_node, scan_ctr)
+                if to_add:
+                    scan_ctr += 1
+                if not isinstance(to_add, list):
+                    for i in range(1, size):
+                        comm.send(None, dest = i, tag = 0)
+                    done = True
+                else:
+                    for i in range(1, heap_ctr):
+                        answer = pickle.loads(comm.recv(source = i, tag = 0))
+                        if isinstance(answer, list):
+                            for node_info in answer:
+                                #Check that the path energy passed from a different processer is lower than the existing one for the newly calulated node.
+                                if node_info["path_energy"] < energies[node_info["node_id"]]:
+                                    energies[node_info["node_id"]] = node_info["path_energy"]
+                                    to_add.append(node_info)
+                        else:
+                            to_add = answer
+                            done = True
 
-            Helper.print("-----------------------------------------------------")
-            Helper.print("Lowest node:", current.get_id(), "Eng:", current_energy, "Parent:", parent_id, "Pos:", current.get_pos())
-            current.reset_lowest(parent_id)
-            Helper.print("Saving datafile for node:", current.get_id(), "Ctr:", scan_ctr, "TID:", current.get_tid())
-            current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
-            scan_ctr += 1
+                if not done:
+                    for node in to_add:
+                        heapq.heappush(priority_queue, node)
 
-            if current.is_tail():
-                self.__tail.reset_tip()
-                self.__head.reset_tip()
-                return current_energy/current.get_surface_area()
-
-            neighbors = current.get_neighbors()
-            for neighbor in neighbors:
-                if not neighbor.is_head() and neighbor.get_id() != parent_id:
-                    path_energy = neighbor.activate(parent = current) - starting_pe
-                    step_eng = path_energy - energies[current]
-                    if step_eng < 0:
-                        path_energy = energies[current]
-                        step_eng = 0
-                    Helper.print("Looking at node:", neighbor.get_id(), "Eng:", path_energy, "Pos:", neighbor.get_pos())
-                    if path_energy < energies[neighbor]:
-                        self.__paths[neighbor] = current
-                        energies[neighbor] = path_energy
-                        self.__step_energies[neighbor] = step_eng
-                        heapq.heappush(priority_queue, (path_energy, neighbor, current.get_id()))
-            #current.deactivate()
+            for i in range(1, size):
+                comm.send(None, dest = i, tag = 0)
 
 
-        self.__tail.reset_tip()
-        self.__head.reset_tip()
-        return float("inf")
+        else:
+            done = False
+            while not done:
+                energies = comm.recv(source = 0, tag = 0)
+                if not energies:
+                    done = True
+                else:
+                    energies = pickle.loads(energies)
+                    current_node = pickle.loads(comm.recv(source = 0, tag = 1))
+                    to_add = dijkstra_step(energies, current_node, scan_ctr)
+                    if to_add:
+                        scan_ctr += 1
+                    """
+                    if not isinstance(to_add, list):
+                        comm.send(None, dest = 0, tag = 0)
+                        comm.send(to_add, dest = 0, tag = 1)
+                    else:
+                        to_add = list(map(pickle.dumps, to_add))
+                        comm.send(pickle.dumps(energies), dest = 0, tag = 0)
+                        comm.send(to_add, dest = 0, tag = 1)
+                    """
+                    comm.send(pickle.dumps(to_add), dest = 0, tag = 1)
 
-    def __rec_path_search(self, node, path):
-        to_add = (*node.get_pos(), self.__step_energies[node])
+
+        comm.Barrier()
+        if rank == 0:
+            for i in range(1, size):
+                paths = comm.recv(source = i, tag = 0)
+                steps = comm.recv(source = i, tag = 1)
+                for node, parent_pair in path.items():
+                    if not node in self.__paths or parent_pair[-1] < self.__paths[node][-1]:
+                        self.__paths[node] = parent_pair[0]
+                for node, eng_pair in steps.items():
+                    if not node in self.__step_energies or eng_pair[-1] < self.__step_energies[node][-1]:
+                        self.__step_energies[node] = eng_pair[0]
+        else:
+            comm.send(self.__paths, dest = 0, tag = 0)
+            comm.send(self.__step_energies, dest = 0, tag = 0)
+
+        self.__paths = comm.bcast(self.__paths, root = 0)
+        self.__step_energies = comm.bcast(self.__step_energies, root = 0)
+
+        if not isinstance(to_add, list):
+            return to_add
+        else:
+            self.__tail.reset_tip()
+            self.__head.reset_tip()
+            return float("inf")
+
+    def __rec_path_search(self, node_id, path):
+        to_add = (*self.__id_node_map[node_id].get_pos(), self.__step_energies[node_id])
         path.append(to_add)
 
-        if node.is_head():
+        if self.__id_node_map[node_id].is_head():
             return
         else:
-            self.__rec_path_search(self.__paths[node], path)
+            self.__rec_path_search(self.__paths[node_id], path)
 
     def get_paths(self):
         out = list()
         desired_rec_depth = len(self.__paths)*2
         if desired_rec_depth > sys.getrecursionlimit():
             sys.setrecursionlimit(desired_rec_depth)
-        for node in self.__paths.keys():
-            if node not in self.__paths.values():
+        for node_id in self.__paths.keys():
+            if node_id not in self.__paths.values():
                 path = list()
-                self.__rec_path_search(node, path)
-                if node.is_tail():
+                self.__rec_path_search(node_id, path)
+                if self.__id_node_map[node_id].is_tail():
                     path[0] = (path[1][0], path[0][1], path[0][2])
                 path[-1] = (path[-2][0], path[-1][1], path[-1][2])
                 out.append(path)
@@ -261,6 +353,7 @@ class FracGraph:
             new_node = self.__node_hash[disc_coords]
         else:
             new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr)
+            self.__id_node_map.append(new_node)
             self.__node_hash[disc_coords] = new_node
             Helper.print("Created a new node", self.__node_ctr)
             self.__node_ctr += 1
@@ -356,7 +449,6 @@ class Node:
         self.__surface_area = 0
         self.__test_mode = test_mode
         self.__old_tip = None
-        self.__versions = dict()
 
         if self.__is_head:
             self.__units = units
@@ -447,6 +539,9 @@ class Node:
     def get_id(self):
         return self.__id
 
+    def get_theta(self):
+        return self.__theta
+
     def get_parent_id(self):
         if self.__is_head:
             return None
@@ -473,6 +568,9 @@ class Node:
 
     def get_lmp(self):
         return self.__lmp
+
+    def get_typeset_list(self):
+        return self.type_holder.get_typeset_list()
 
     #State functions
     def is_head(self):
@@ -519,41 +617,15 @@ class Node:
         #Computes
         self.__lmp.command("compute pe_pa all pe/atom")
 
-    def reset_lowest(self, parent_id):
+    def reset_lowest(self, typeset_id, parent_rank, typeset_list, surface_area, theta):
         if not self.is_head():
-            self.type_holder.change_typeset(self.__typeset_id)
-            prev_tid = self.__typeset_id
-            for pid in self.__versions.keys():
-                if pid == parent_id:
-                    self.__typeset_id, self.__surface_area, self.__theta = self.__versions[parent_id]
-                    Helper.print("Going back to type set:", self.__typeset_id)
-                    self.type_holder.change_typeset(self.__typeset_id)
-                    Helper.print("Removing type set:", prev_tid)
-                    self.type_holder.delete_typeset(prev_tid)
-                else:
-                    Helper.print("Removing type set:",self.__versions[pid][0])
-                    self.type_holder.delete_typeset(self.__versions[pid][0])
-            self.__versions = dict()
-
-
-    def __save_state(self):
-        #Helper.print("Saving state of node:", self.__id, "with parent:", self.__parent_id)
-        self.__versions[self.__parent.__id] = (self.__typeset_id, self.__surface_area, self.__theta)
-
-    def __reset(self):
-        neighs = self.__neighbors
-        theta = self.__theta
-        old_tip = self.__old_tip
-        parent = self.__parent
-        versions = self.__versions
-        self.__init__(is_head = self.__is_head, is_tail = self.__is_tail, node_ctr = self.__id, tip = self.__tip)
-        self.__neighbors = neighs
-        self.__theta = theta
-        self.__parent = parent
-        self.__old_tip = old_tip
-        self.__versions = versions
-
-
+            self.__surface_area = surface_area
+            self.__theta = theta
+            if parent_rank == rank:
+                self.__typeset_id = typeset_id
+                self.type_holder.change_typeset(self.__typeset_id)
+            else:
+                self.__typeset_id = self.type_holder.add_typeset(typeset_list)
 
 
     def activate(self, parent = None):
@@ -567,11 +639,7 @@ class Node:
                 self.__typeset_id = 0
                 Helper.print("Head node activated")
         else:
-            if self.__active:
-                self.__save_state()
             self.set_parent(parent)
-            if self.__active:
-                self.__reset()
 
             self.__lmp = self.__parent.get_lmp()
             self.type_holder = self.__parent.type_holder
@@ -596,8 +664,8 @@ class Node:
             old_tid = self.type_holder.get_current()
 
             new_types = self.__new_types(my_atoms, types, self.__lmp.get_natoms())
-            self.__typeset_id = self.type_holder.add_typeset(new_types)
-            self.type_holder.change_typeset(self.__typeset_id)
+            self.__typeset_id = self.type_holder.add_typeset(new_types, rank = rank, order_id = self.__id)
+            self.type_holder.change_typeset(self.__typeset_id, rank = rank)
             Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}")
             
 

@@ -7,32 +7,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
-
-def draw_arcs(nodes, alpha, R):
-    for node in nodes:
-        if not node.is_leaf():
-            circ_angles = np.linspace(alpha*np.pi/180, np.pi*(1 - alpha/180), 100)
-            point = node.get_pos()
-            circ_x = point[0] + R*np.cos(circ_angles)
-            circ_y = point[1] + R*np.sin(circ_angles)
-            plt.plot(circ_x, circ_y, color = "blue")
-
-def draw_lines(nodes):
-    for node in nodes:
-        parent_pos = node.get_pos()
-        for child in node.get_neighbors():
-            node_pos = child.get_pos()
-            if node_pos[0] - parent_pos[0]:
-                tan = (node_pos[1] - parent_pos[1])/(node_pos[0] - parent_pos[0])
-                line_x = np.linspace(parent_pos[0], node_pos[0], 100)
-                line_y = parent_pos[1] + tan*(line_x - parent_pos[0])
-            else:
-                line_x = [node_pos[0], node_pos[0]]
-                line_y = [parent_pos[1], node_pos[1]]
-
-            plt.plot(line_x, line_y, color = "red")
-
-
 def get_RGB(eng, min_eng, max_eng):
     norm_eng = (eng - min_eng)/(max_eng - min_eng)
     if norm_eng < 0:
@@ -78,11 +52,10 @@ def color_paths(graph):
             paths.append(path)
 
                 
-        #paths = [[eval(pos.strip(), {"__builtins__" : None}, custom_globals) for pos in line.split('|')] for line in file_lines[:-1]]
         file.close()
 
     unique_nodes = pd.unique(pd.DataFrame(paths).values.ravel())
-    print(*unique_nodes, sep = "\n")
+    #print(*unique_nodes, sep = "\n")
     num_unique = len(unique_nodes)
     energies = np.array([tup[2] for tup in unique_nodes if tup])
     min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
@@ -121,10 +94,8 @@ def color_paths(graph):
             parent_RGB = get_RGB(parent_pos[2], min_eng, max_eng)
             colors = create_gradient(parent_RGB, node_RGB, int(segments_per_cut/2))
             colors += [node_RGB]*(segments_per_cut - int(segments_per_cut/2))
-            #colors = create_gradient(parent_RGB, node_RGB, segments_per_cut)
             lc = LineCollection(generate_segments(line_x, line_y), colors = colors, linewidth = 0.5, capstyle = "round", alpha = 0.5)
             ax.add_collection(lc)
-            #plt.plot(line_x, line_y, color = (node_RGB))
 
             visited.append(node_pos)
             
@@ -139,13 +110,10 @@ def color_paths(graph):
 def visualize(graph, dr, dtheta):
     nodes = graph.flatten()
     points = np.array([node.get_pos() for node in nodes])
-    #points = graph.get_node_coords()
 
     x = points[:, 0]
     y = points[:, 1]
 
-    #draw_arcs(nodes, dtheta, dr)
-    #draw_lines(nodes)
     color_paths(graph)
 
     box = graph.get_box()
@@ -206,8 +174,7 @@ def main():
     Data.potfile = args.force_field
     Data.non_inter_cutoff = args.width
 
-    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = True, simulation_temp = args.temperature, connection_radius = args.radius)
-    """
+    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
     if not os.path.isfile("path_save.csv"):
         graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
         #graph.build_test(interactions = args.interactions)
@@ -221,7 +188,6 @@ def main():
         Helper.print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 
     visualize(graph, args.radius, args.angle)
-    """
 
 
 

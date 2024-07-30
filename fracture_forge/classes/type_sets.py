@@ -1,5 +1,7 @@
 import numpy as np
 import ctypes as ct
+from mpi4py import MPI
+
 
 class Holder:
     def __init__(self, lmp):
@@ -14,6 +16,7 @@ class Holder:
         self.__type_set_dict[self.__ntype_sets] = list(map(int, typeset))
         self.__ntype_sets += 1
         self.__nactive_typesets += 1
+
         return self.__ntype_sets - 1
 
     def change_typeset(self, typeset_id):
@@ -28,7 +31,7 @@ class Holder:
             raise RuntimeError("Invalid type set id")
         if typeset_id == self.__current_typeset:
             raise RuntimeError("Cannot delete current type set")
-        self.__type_set_dict[typeset_id]= []
+        self.__type_set_dict[typeset_id] = []
         self.__nactive_typesets -= 1
 
     def get_current(self):
@@ -36,3 +39,9 @@ class Holder:
 
     def get_ntype_sets(self):
         return self.__nactive_typesets
+
+    def get_typeset_list(self, typeset_id = None):
+        if not typeset_id:
+            typeset_id = self.__current_typeset
+
+        return self.__type_set_dict[typeset_id]

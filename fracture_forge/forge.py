@@ -60,7 +60,9 @@ def color_paths(graph):
     unique_nodes = pd.unique(pd.DataFrame(paths).values.ravel())
     num_unique = len(unique_nodes)
     energies = np.array([tup[2] for tup in unique_nodes if tup])
-    min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
+    non_zero = [eng for eng in energies if eng != 0]
+#    min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
+    min_eng, max_eng = np.percentile(non_zero, 5), np.percentile(non_zero, 95)
     
     box = graph.get_box()
     segments_per_cut = 100
@@ -69,16 +71,29 @@ def color_paths(graph):
     ax = plt.gca()
     main_path_offset = 1
     for npi, path in enumerate(paths):
-        print(f"Colored {round(100*npi/(num_paths - 1), 2)}% of paths")
+        #print(f"Colored {round(100*npi/(num_paths - 1), 2)}% of paths")
         parent_pos = path[0]
         i = 1
         num_nodes = len(path)
         if writing:
             text += "|".join(map(str, path)) + "\n"
         if parent_pos[1] > box[1][1]:
+            line_length = 0
             plt.plot([node[0] for node in path], [node[1] for node in path], color = (0.5, 0.5, 0.5, 0.2), linewidth = 3)
+            #prev_node = (path[0][0], box[1][1])
+            prev_node = path[1]
+            for node in path[1:-1]:
+                line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
+                prev_node = node
+
+            #node = (path[-1][0], box[0][1])
+            #line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
+            print("Line length:", line_length)
+
 
         while i < num_nodes:
+            line_thickness = 0.5
+            line_transparency = 0.5
             node_pos = parent_pos
             parent_pos = path[i]
             if node_pos in visited:
@@ -92,11 +107,16 @@ def color_paths(graph):
                 line_x = [node_pos[0]]*segments_per_cut
                 line_y = np.linspace(parent_pos[1], node_pos[1], segments_per_cut)
 
+
             node_RGB = get_RGB(node_pos[2], min_eng, max_eng)
+            if node_pos[2] == 0:
+                node_RGB = (0, 0, 0)
+                line_thickness = 1
+                line_transparency = 1
             parent_RGB = get_RGB(parent_pos[2], min_eng, max_eng)
             colors = create_gradient(parent_RGB, node_RGB, int(segments_per_cut/2))
             colors += [node_RGB]*(segments_per_cut - int(segments_per_cut/2))
-            lc = LineCollection(generate_segments(line_x, line_y), colors = colors, linewidth = 0.5, capstyle = "round", alpha = 0.5)
+            lc = LineCollection(generate_segments(line_x, line_y), colors = colors, linewidth = line_thickness, capstyle = "round", alpha = line_transparency)
             ax.add_collection(lc)
 
             visited.append(node_pos)
@@ -187,8 +207,9 @@ def main():
 
 
         data_dir = "out_files" 
-        res = 0.69*graph.calculate(data_dir)
-        Helper.mpi_print("G:", res)
+        res = graph.calculate(data_dir)
+        if rank == 0:
+            Helper.mpi_print("G:", 0.69*res)
     else:
         Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 

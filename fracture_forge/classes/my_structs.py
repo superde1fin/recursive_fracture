@@ -107,7 +107,7 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
         self.__modify_struct()
-        node = self.attach(coords = (20, 20))
+        node = self.attach(coords = (15, 15))
         self.__head.attach(node)
         node.attach(self.__tail)
 
@@ -205,7 +205,9 @@ class FracGraph:
             if current.is_tail():
                 self.__tail.reset_tip()
                 self.__head.reset_tip()
-                return current_node["path_energy"]/current.get_surface_area()
+                Helper.mpi_print("Energy difference:", current_node["path_energy"])
+                Helper.mpi_print("Surface area created:", 2*current.get_surface_area())
+                return current_node["path_energy"]/(2*current.get_surface_area())
 
             new_nodes = list()
             neighbors = current.get_neighbors()
@@ -287,6 +289,7 @@ class FracGraph:
             while not done:
                 energies = comm.recv(source = 0, tag = 0)
                 if not energies:
+                    to_add = 0
                     done = True
                 else:
                     energies = pickle.loads(energies)
@@ -313,21 +316,22 @@ class FracGraph:
                 self.__paths[key] = value[0]
             for key, value in self.__step_energies.items():
                 self.__step_energies[key] = value[0]
+
         else:
             comm.send(self.__paths, dest = 0, tag = 0)
             comm.send(self.__step_energies, dest = 0, tag = 1)
 
-        """
-        self.__paths = comm.bcast(self.__paths, root = 0)
-        self.__step_energies = comm.bcast(self.__step_energies, root = 0)
-        """
-
         if not isinstance(to_add, list):
-            return to_add
+            gathered = comm.gather(to_add, root = 0)
         else:
             self.__tail.reset_tip()
             self.__head.reset_tip()
-            return float("inf")
+            gathered = comm.gather(None, root = 0)
+
+        if rank == 0:
+            return next((item for item in gathered if item is not None), float("inf"))
+        else:
+            return None
 
     @Helper.linear_func
     def __rec_path_search(self, node_id, path):
@@ -666,12 +670,15 @@ class Node:
 
             par_pos = self.__parent.get_pos()
             y_dist = self.__tip[1] - par_pos[1]
+            x_dist = self.__tip[0] - par_pos[0]
             if self.__parent.is_head():
-                y_dist -= (Data.old_bounds[0] - par_pos[1])
+                y_dist = self.__tip[1] - Data.old_bounds[0]
+                x__dist = 0
             if self.__is_tail:
-                y_dist -= (self.__tip[1] - Data.old_bounds[1])
+                y_dist = Data.old_bounds[1] - par_pos[1]
+                x__dist = 0
 
-            dist = np.sqrt((self.__tip[0] - par_pos[0])**2 + y_dist**2)
+            dist = np.sqrt(x_dist**2 + y_dist**2)
             self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
 
             my_atoms = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))

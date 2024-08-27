@@ -209,7 +209,7 @@ def main():
         data_dir = "out_files" 
         res = graph.calculate(data_dir)
         if rank == 0:
-            Helper.mpi_print("G:", 0.69*res)
+            Helper.mpi_print("G:",  0.69478578545*res)
     else:
         Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 

@@ -107,7 +107,7 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
         self.__modify_potfile(interactions)
         self.__modify_struct()
-        node = self.attach(coords = (15, 15))
+        node = self.attach(coords = (20, 20))
         self.__head.attach(node)
         node.attach(self.__tail)
 
@@ -205,8 +205,8 @@ class FracGraph:
             if current.is_tail():
                 self.__tail.reset_tip()
                 self.__head.reset_tip()
-                Helper.mpi_print("Energy difference:", current_node["path_energy"])
-                Helper.mpi_print("Surface area created:", 2*current.get_surface_area())
+                Helper.print("Rank:", rank, "Surface area created:", 2*current.get_surface_area())
+                Helper.print("Rank:", rank, "Energy change:", current_node["path_energy"])
                 return current_node["path_energy"]/(2*current.get_surface_area())
 
             new_nodes = list()
@@ -289,8 +289,8 @@ class FracGraph:
             while not done:
                 energies = comm.recv(source = 0, tag = 0)
                 if not energies:
-                    to_add = 0
                     done = True
+                    to_add = 0
                 else:
                     energies = pickle.loads(energies)
                     current_node = pickle.loads(comm.recv(source = 0, tag = 1))
@@ -316,14 +316,18 @@ class FracGraph:
                 self.__paths[key] = value[0]
             for key, value in self.__step_energies.items():
                 self.__step_energies[key] = value[0]
-
         else:
             comm.send(self.__paths, dest = 0, tag = 0)
             comm.send(self.__step_energies, dest = 0, tag = 1)
 
+        """
+        self.__paths = comm.bcast(self.__paths, root = 0)
+        self.__step_energies = comm.bcast(self.__step_energies, root = 0)
+        """
+
         if not isinstance(to_add, list):
             gathered = comm.gather(to_add, root = 0)
-        else:
+         else:
             self.__tail.reset_tip()
             self.__head.reset_tip()
             gathered = comm.gather(None, root = 0)
@@ -332,6 +336,14 @@ class FracGraph:
             return next((item for item in gathered if item is not None), float("inf"))
         else:
             return None
+
+
+        if not isinstance(to_add, list):
+            return to_add
+        else:
+            self.__tail.reset_tip()
+            self.__head.reset_tip()
+            return float("inf")
 
     @Helper.linear_func
     def __rec_path_search(self, node_id, path):
@@ -423,18 +435,22 @@ class FracGraph:
             text = open(self.__head.potfile, 'r').read()
             new_potfile = open(name, 'w')
             new_text = text + "\n\n#-------------------------\n\n"
+            #t is type of atom
             for t in range(1, ntypes + 1):
+                #g is group of types
                 for g in range(groups - 1):
                     mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
                     mass_line = mass_re.findall(new_text)[-1]
                     new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
 
 
+                    #j is atom type greater than t (current type) used for pair combinations
                     for j in range(t, ntypes + 1):
                         coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
+                        #Add a pair_coeff line within current group
                         new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
 
-
+                        #Cycle through inra group interactions
                         for group_iter in range(g + 2, groups + 1):
                             if (g + 1, group_iter) in interactions:
                                 new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
@@ -442,14 +458,15 @@ class FracGraph:
                                     new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
                             else:
                                 tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}).+", "\ttable\t${table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
                                 if t != j:
                                     tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
-                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}.+\}}\s+)\w+(?=\s+.+)", "NoNo", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}).+", "\ttable\t${table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
                     
             general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
-            type_names = general_type_re.search(new_text).group()*groups
-            new_text = general_type_re.sub(type_names, new_text)
+            if(general_type_re.search(new_text)):
+                    type_names = general_type_re.search(new_text).group()*groups
+                    new_text = general_type_re.sub(type_names, new_text)
             new_potfile.write(new_text)
 
         self.__head.potfile = name
@@ -484,14 +501,14 @@ class Node:
                 filename = Data.structure_file
             else:
                 filename = glob.glob("glass_*.structure")[-1]
-            self.__lmp.command(f"read_data {filename}")
             self.structure_file = os.path.abspath(filename)
             if Data.potfile:
                 self.potfile = Data.potfile
             else:
                 name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
                 self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
-            self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}")
+            self.__lmp.command(f"read_data {filename}")
+            self.__lmp.command(f"variable pot_dir string ../{'/'.join(self.potfile.split(r'/')[:-1])}")
             self.type_holder = Holder(self.__lmp)
             self.__theta = np.pi/2
             

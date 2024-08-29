@@ -187,6 +187,37 @@ class FracGraph:
         else:
             raise RuntimeError(f"ERROR: Expected type dict or tuple not {type(node_info)}")
 
+    @Helper.linear_func
+    def recalculate_path(self, path, interactions = "default"):
+        if interactions == "default":
+            Data.type_groups = 1
+        else:
+            Data.type_groups = max(sum(interactions, ()))
+
+        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
+
+        Helper.mpi_print("Number of type groups:", Data.type_groups)
+        self.__modify_potfile(interactions)
+        self.__modify_struct()
+        starting_pe = self.__head.activate()
+        prev_node = self.__head
+        for node_pos in path:
+            node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr)
+            self.__node_ctr += 1
+            node.activate(parent = prev_node)
+            prev_node = node
+
+        path_eng = self.__tail.activate(parent = node) - starting_pe
+
+
+        self.__tail.get_lmp().command(f"write_data {Data.non_inter_cutoff}_surface.structure")
+        Helper.print("Surface area created:", 2*self.__tail.get_surface_area())
+        Helper.print("Energy change:", path_eng)
+
+        return path_eng/(2*self.__tail.get_surface_area())
+
+        
+
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         def dijkstra_step(energies, current_node, scan_ctr):
             scan_ctr = scan_ctr*size + rank
@@ -327,7 +358,7 @@ class FracGraph:
 
         if not isinstance(to_add, list):
             gathered = comm.gather(to_add, root = 0)
-         else:
+        else:
             self.__tail.reset_tip()
             self.__head.reset_tip()
             gathered = comm.gather(None, root = 0)

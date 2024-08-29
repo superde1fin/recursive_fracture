@@ -33,35 +33,40 @@ def generate_segments(x, y):
     points = np.array([x, y]).T.reshape(-1, 1, 2)
     return np.concatenate([points[:-1], points[1:]], axis = 1)
 
+@Helper.linear_func
+def load_paths(filename):
+    file = open(filename, "r")
+    custom_globals = {"np" : np}
+    file_lines = file.readlines()
+    paths = list()
+    for line in file_lines:
+        path = list()
+        for pos in line.split('|'):
+            pos_tuple = eval(pos.strip(), {"__builtins__" : None}, custom_globals)
+            path.append(pos_tuple)
+        paths.append(path)
+
+            
+    file.close()
+    return paths
+
+
 
 @Helper.linear_func
-def color_paths(graph):
-    if not os.path.isfile("path_save.csv"):
+def color_paths(graph, paths = None):
+    if not paths is None:
+        writing = False
+        paths = load_paths("path_save.csv")
+    else:
         paths = graph.get_paths()
         writing = True
         text = ""
         file = open("path_save.csv", "w")
-    else:
-        writing = False
-        file = open("path_save.csv", "r")
-        custom_globals = {"np" : np}
-        file_lines = file.readlines()
-        paths = list()
-        for line in file_lines:
-            path = list()
-            for pos in line.split('|'):
-                pos_tuple = eval(pos.strip(), {"__builtins__" : None}, custom_globals)
-                path.append(pos_tuple)
-            paths.append(path)
-
-                
-        file.close()
 
     unique_nodes = pd.unique(pd.DataFrame(paths).values.ravel())
     num_unique = len(unique_nodes)
     energies = np.array([tup[2] for tup in unique_nodes if tup])
     non_zero = [eng for eng in energies if eng != 0]
-#    min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
     min_eng, max_eng = np.percentile(non_zero, 5), np.percentile(non_zero, 95)
     
     box = graph.get_box()
@@ -70,6 +75,8 @@ def color_paths(graph):
     visited = list()
     ax = plt.gca()
     main_path_offset = 1
+    tail_y = -float("inf")
+    full_path = None
     for npi, path in enumerate(paths):
         #print(f"Colored {round(100*npi/(num_paths - 1), 2)}% of paths")
         parent_pos = path[0]
@@ -77,18 +84,9 @@ def color_paths(graph):
         num_nodes = len(path)
         if writing:
             text += "|".join(map(str, path)) + "\n"
-        if parent_pos[1] > box[1][1]:
-            line_length = 0
-            plt.plot([node[0] for node in path], [node[1] for node in path], color = (0.5, 0.5, 0.5, 0.2), linewidth = 3)
-            #prev_node = (path[0][0], box[1][1])
-            prev_node = path[1]
-            for node in path[1:-1]:
-                line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
-                prev_node = node
-
-            #node = (path[-1][0], box[0][1])
-            #line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
-            print("Line length:", line_length)
+        if parent_pos[1] > box[1][1] and parent_pos[1] > tail_y:
+            tail_y = parent_pos[1]
+            full_path = path
 
 
         while i < num_nodes:
@@ -123,6 +121,22 @@ def color_paths(graph):
             
             i += 1
         final_path = False
+
+    if full_path:
+        line_length = 0
+        plt.plot([node[0] for node in full_path], [node[1] for node in full_path], color = (0.5, 0.5, 0.5, 0.2), linewidth = 3)
+        #prev_node = (path[0][0], box[1][1])
+        prev_node = full_path[1]
+        for node in full_path[1:-1]:
+            line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
+            prev_node = node
+
+        node = (path[-1][0], box[0][1])
+        line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
+        print("Line length:", line_length)
+    else:
+        raise RuntimeError("Error: No full path was found, something went wrong")
+
     if writing:
         file.write(text)
         file.close()
@@ -130,7 +144,7 @@ def color_paths(graph):
 
 
 @Helper.linear_func
-def visualize(graph, dr, dtheta):
+def visualize(graph, paths = None):
     """
     nodes = graph.flatten()
     points = np.array([node.get_pos() for node in nodes])
@@ -139,7 +153,7 @@ def visualize(graph, dr, dtheta):
     y = points[:, 1]
     """
 
-    color_paths(graph)
+    color_paths(graph, paths)
 
     box = graph.get_box()
     plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black", alpha = 0.1)
@@ -159,13 +173,13 @@ def parser_call():
     parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
     parser.add_argument("-r", "--radius", type = int, default = SystemParams.dr, help = "Probe radius", metavar = "")
     parser.add_argument("-e", "--error", type = int, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
-    parser.add_argument("-a", "--angle", type = int, default = SystemParams.dtheta, help = "Angle between the branches of the fracture tree", metavar = "")
     parser.add_argument("-i", "--interactions", action = "store_true", help = "Prompts the user to specify interactions between type groups")
     parser.add_argument("-s", "--structure", default = None, help = "System structure file in lammps format", metavar = "")
     parser.add_argument("-f", "--force_field", default = None, help = "Forcfield defining atom interactions", metavar = "")
     parser.add_argument("-p", "--pivot_type", default = SystemParams.pivot_type, help = "Numerical type corresponding to a atoms around which the fracture nodes will be created", metavar = "")
     parser.add_argument("-n", "--neighbors", default = SystemParams.neigh_num, help = "Number of nearest neighbors to the pivot atom, used to determine the midpoint of bonds between the pivot atom and its neighbors for fracture node creation", metavar = "")
-    parser.add_argument("-w", "--width", default = Data.non_inter_cutoff, help = "Surface width", metavar = "", type = int)
+    parser.add_argument("-w", "--width", default = Data.non_inter_cutoff, help = "Surface width (non-interacting cutoff).", metavar = "", type = float)
+    parser.add_argument("-v", "--vary", default = 0, help = "This value when specified changes the default non-interacting cutoff width. Only works with a present path_save.csv file generated after previous calculation.", metavar = "", type = float)
     args = parser.parse_args()
 
     
@@ -213,11 +227,31 @@ def main():
     else:
         Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 
-    visualize(graph, args.radius, args.angle)
+        paths = load_paths("path_save.csv")
+        if args.vary:
+            full_path = None
+            found = False
+            i = 0
+            num_paths = len(paths)
+            box = graph.get_box()
+            while i < num_paths and not found:
+                if paths[i][0][1] > box[1][1]:
+                    full_path = paths[i][-2:0:-1]
+                    found = True
+                else:
+                    i += 1
+            Data.non_inter_cutoff = args.vary
+            res = graph.recalculate_path(full_path, interactions = args.interactions)
+            print(f"Recalculated G: {0.69478578545*res} for non-interacting width of {args.vary} Angstroms")
+
+            
+
+        #visualize(graph, paths)
 
 
 
 
 
 if __name__ == "__main__":
+
     main()

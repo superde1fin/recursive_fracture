@@ -7,6 +7,7 @@ class Data:
                 "metal" : {"timestep" : 1e-12},
                 }
     non_inter_cutoff = 10
+    use_pressure = False
 
 class SystemParams:
     simulation_temp = 300

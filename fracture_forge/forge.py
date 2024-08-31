@@ -180,6 +180,7 @@ def parser_call():
     parser.add_argument("-n", "--neighbors", default = SystemParams.neigh_num, help = "Number of nearest neighbors to the pivot atom, used to determine the midpoint of bonds between the pivot atom and its neighbors for fracture node creation", metavar = "")
     parser.add_argument("-w", "--width", default = Data.non_inter_cutoff, help = "Surface width (non-interacting cutoff).", metavar = "", type = float)
     parser.add_argument("-v", "--vary", default = 0, help = "This value when specified changes the default non-interacting cutoff width. Only works with a present path_save.csv file generated after previous calculation.", metavar = "", type = float)
+    parser.add_argument("-pr", "--pressure", default = False, help = "Calculate surface energy using pressure difference.", action = "store_true")
     args = parser.parse_args()
 
     
@@ -213,17 +214,19 @@ def main():
     Data.potfile = args.force_field
     Data.non_inter_cutoff = args.width
 
+    if args.pressure:
+        Data.use_pressure = True
+
     graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
     if not os.path.isfile("path_save.csv"):
-        graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-        #graph.build_test(interactions = args.interactions)
+        #graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+        graph.build_test(interactions = args.interactions)
         Helper.mpi_print("Number of nodes created:", len(graph))
 
 
         data_dir = "out_files" 
         res = graph.calculate(data_dir)
-        if rank == 0:
-            Helper.mpi_print("G:",  0.69478578545*res)
+        Helper.mpi_print("G:",  0.69478578545*res)
     else:
         Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
 

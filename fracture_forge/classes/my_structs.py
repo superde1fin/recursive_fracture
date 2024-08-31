@@ -69,7 +69,7 @@ class FracGraph:
         atom_box = tuple(self.__box)
         atom_box[0][1] = Data.old_bounds[0]
         atom_box[1][1] = Data.old_bounds[1]
-        return atom_box
+        return np.array(atom_box[:2])
 
     def get_head(self):
         return self.__head
@@ -245,7 +245,7 @@ class FracGraph:
             for neighbor in neighbors:
                 neigh_id = neighbor.get_id()
                 if not neighbor.is_head() and neigh_id != current_node["parent_id"]:
-                    path_energy = neighbor.activate(parent = current) - starting_pe
+                    path_energy = neighbor.activate(box = self.get_box(), parent = current) - starting_pe
                     step_eng = path_energy - energies[current_node["node_id"]]
                     if step_eng < 0:
                         path_energy = energies[current_node["node_id"]]
@@ -266,7 +266,7 @@ class FracGraph:
 
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
-        starting_pe = self.__head.activate()
+        starting_pe = self.__head.activate(box = self.get_box())
 
         scan_ctr = 0
         if rank == 0:
@@ -676,13 +676,16 @@ class Node:
         self.__lmp.command("neighbor 2.0 bin")
         self.__lmp.command("neigh_modify every 1 delay 0")
 
-    def __vizualization(self, thermo_step, dump_step):
+    def __visualization(self, thermo_step = 1, dump_step = 1):
         #self.__lmp.command(f"thermo {thermo_step}")
         #self.__lmp.command("thermo_style custom step temp etotal pe vol density pxx pyy pzz")
         #self.__lmp.command("thermo_modify flush yes")
 
         #Computes
         self.__lmp.command("compute pe_pa all pe/atom")
+        if Data.use_pressure:
+            self.__lmp.command("compute stress_pa all stress/atom NULL")
+            self.__lmp.command("compute stress_total all reduce sum c_stress_pa[1]")
 
     def reset_lowest(self, typeset_id, parent_rank, typeset_list, surface_area, theta, head):
         self.type_holder = head.type_holder
@@ -697,7 +700,7 @@ class Node:
                 self.__typeset_id = self.type_holder.add_typeset(typeset_list)
 
 
-    def activate(self, parent = None):
+    def activate(self, box, parent = None):
         if self.__is_head:
             if not self.__active:
                 self.__lmp.command("clear")
@@ -705,6 +708,7 @@ class Node:
                 self.__lmp.command(f"atom_modify map yes")
                 self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
+                self.__visualization()
                 self.__typeset_id = 0
                 Helper.mpi_print("Head node activated")
         else:
@@ -713,8 +717,6 @@ class Node:
             self.__lmp = self.__parent.get_lmp()
             self.type_holder = self.__parent.type_holder
             self.__prev_theta = self.get_parent_angle()
-
-            box = self.__lmp.extract_box()
 
             par_pos = self.__parent.get_pos()
             y_dist = self.__tip[1] - par_pos[1]
@@ -749,7 +751,11 @@ class Node:
 
         self.__lmp.command("run 0")
         self.__active = True
-        self.__pe = self.__lmp.get_thermo("pe")
+        if Data.use_pressure:
+            print(self.__lmp.numpy.extract_compute("stress_total", 0, 0)/(9689.23*np.prod(box[1] - box[0])))
+            self.__pe = 0
+        else:
+            self.__pe = self.__lmp.get_thermo("pe")
         return self.__pe
 
 

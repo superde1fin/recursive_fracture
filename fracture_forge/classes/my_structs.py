@@ -1,6 +1,6 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys, heapq, math, pickle
+import glob, os, sys, heapq, math, pickle, random
 import numpy as np
 import ctypes as ct
 import regex as re
@@ -77,10 +77,8 @@ class FracGraph:
     def __len__(self):
         return self.__node_ctr
 
-    """
     def flatten(self):
         return self.__node_hash.values()
-    """
 
     def get_node_coords(self):
         return np.array(list(self.__node_hash.keys()))
@@ -216,7 +214,56 @@ class FracGraph:
 
         return path_eng/(2*self.__tail.get_surface_area())
 
-        
+    def __find_rand_path(self):
+        node = self.__head
+        prev_node = None
+        head_stored = False
+        visited = list()
+        while not node.is_tail():
+            path_eng = node.activate(box = self.get_box(), parent = prev_node)
+            visited.append(node.get_id())
+            if not head_stored:
+                start_eng = path_eng
+                head_stored = True
+            neighbors = node.get_neighbors()
+            found_node = False
+            neigh_ctr = 0
+            num_neghs = len(neighbors)
+            prev_node = node
+            #Helper.print("Looking for neighbors of node:", prev_node.get_id())
+            while not found_node:
+                node = random.choice(neighbors)
+                #Helper.print("Trying to pick node:", node.get_id())
+                if not node.get_id() in visited and node.get_pos()[1] > prev_node.get_pos()[1]:
+                    #Helper.print("PICKED")
+                    found_node = True
+                else:
+                    neigh_ctr += 1
+                    neighbors.remove(node)
+                if neigh_ctr == num_neghs:
+                    raise RuntimeError("Unavoidable loop in a random path, please increase the probe radius")
+        path_eng = node.activate(box = self.get_box(), parent = prev_node)
+        return (path_eng - start_eng)/(2*node.get_surface_area())
+
+
+    def get_random_paths(self, num_paths):
+        path_energies = list()
+        to_do = num_paths // size
+        if rank < num_paths%size:
+            to_do += 1
+
+        for i in range(to_do):
+            path_energies.append(self.__find_rand_path())
+            #self.__head.get_lmp().command(f"write_data test.{rank}.{i}.struct")
+            self.__head.deactivate()
+
+
+        gathered_values = comm.gather(path_energies, root = 0)
+        if rank == 0:
+            return [item for sublist in gathered_values for item in sublist]
+        else:
+            return None
+
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         def dijkstra_step(energies, current_node, scan_ctr):
@@ -545,6 +592,9 @@ class Node:
             
 
     #Setters
+    def deactivate(self):
+        self.__active = False
+
     def set_tip(self, coords):
         if self.__is_head or self.__is_tail:
             self.__tip = coords

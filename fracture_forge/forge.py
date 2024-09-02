@@ -3,9 +3,37 @@ from classes.Storage import Data, SystemParams, Helper
 from classes.my_structs import FracGraph
 import numpy as np
 import pandas as pd
+from mpi4py import MPI
 
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+@Helper.linear_func
+def get_best_path(paths, box):
+    full_path = list()
+    tail_y = -float("inf")
+    for path in paths:
+        if path[0][1] > tail_y and path[0][1] > box[1][1]:
+            full_path = path[::-1]
+            tail_y = path[0][1]
+
+    if full_path:
+        eng = 0
+        line_length = 0
+        prev_node = full_path[0]
+        for node in full_path[1:]:
+            eng += node[2]
+            line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
+            prev_node = node
+
+        return eng/(2*(box[1][2] - box[0][2])*line_length)
+    else:
+        raise RuntimeError("Error: No full path was found, something went wrong")
+
 
 @Helper.linear_func
 def get_RGB(eng, min_eng, max_eng):
@@ -56,7 +84,6 @@ def load_paths(filename):
 def color_paths(graph, paths = None):
     if not paths is None:
         writing = False
-        paths = load_paths("path_save.csv")
     else:
         paths = graph.get_paths()
         writing = True
@@ -168,6 +195,20 @@ def visualize(graph, paths = None):
     plt.savefig("energy_landscape.png", dpi = 300)
     plt.show()
 
+def vis_nodes(graph):
+    for node in graph.flatten():
+        x, y = node.get_pos()
+        plt.scatter(x, y, color = "black")
+        plt.text(x + 0.1, y + 0.1, str(node.get_id()))
+
+    box = graph.get_box()
+    plt.plot([box[0][0], box[1][0]], [box[0][1], box[0][1]], color = "black", alpha = 0.1)
+    plt.plot([box[0][0], box[1][0]], [box[1][1], box[1][1]], color = "black", alpha = 0.1)
+    plt.plot([box[0][0], box[0][0]], [box[0][1], box[1][1]], color = "black", alpha = 0.1)
+    plt.plot([box[1][0], box[1][0]], [box[0][1], box[1][1]], color = "black", alpha = 0.1)
+    plt.savefig("node_positions.png")
+
+
 def parser_call():
     parser = argparse.ArgumentParser()
     parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
@@ -181,6 +222,7 @@ def parser_call():
     parser.add_argument("-w", "--width", default = Data.non_inter_cutoff, help = "Surface width (non-interacting cutoff).", metavar = "", type = float)
     parser.add_argument("-v", "--vary", default = 0, help = "This value when specified changes the default non-interacting cutoff width. Only works with a present path_save.csv file generated after previous calculation.", metavar = "", type = float)
     parser.add_argument("-pr", "--pressure", default = False, help = "Calculate surface energy using pressure difference.", action = "store_true")
+    parser.add_argument("-rd", "--random", default = 0, help = "Specifies the number of random paths throug a material to run. If this option is specified no path search will be performed.", metavar = "", type = int)
     args = parser.parse_args()
 
     
@@ -219,37 +261,59 @@ def main():
 
     graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
     if not os.path.isfile("path_save.csv"):
-        #graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-        graph.build_test(interactions = args.interactions)
+        graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+        #graph.build_test(interactions = args.interactions)
         Helper.mpi_print("Number of nodes created:", len(graph))
 
 
-        data_dir = "out_files" 
-        res = graph.calculate(data_dir)
-        Helper.mpi_print("G:",  0.69478578545*res)
+        #vis_nodes(graph)
+
+        if args.random:
+            random_paths = graph.get_random_paths(args.random)
+            if rank == 0:
+                f = open("random_paths.csv", "w")
+                f.write('\n'.join(map(str, random_paths)))
+                f.close()
+                plt.hist(random_paths, bins = 3)
+                plt.savefig("random_paths.png")
+        else:
+            data_dir = "out_files" 
+            res = graph.calculate(data_dir)
+            Helper.mpi_print("G:",  0.69478578545*res)
+        paths = None
     else:
         Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
+        if rank == 0:
+            paths = load_paths("path_save.csv")
+            if args.vary:
+                full_path = None
+                found = False
+                i = 0
+                num_paths = len(paths)
+                box = graph.get_box()
+                while i < num_paths and not found:
+                    if paths[i][0][1] > box[1][1]:
+                        full_path = paths[i][-2:0:-1]
+                        found = True
+                    else:
+                        i += 1
+                Data.non_inter_cutoff = args.vary
+                res = graph.recalculate_path(full_path, interactions = args.interactions)
+                print(f"Recalculated G: {0.69478578545*res} for non-interacting width of {args.vary} Angstroms")
 
-        paths = load_paths("path_save.csv")
-        if args.vary:
-            full_path = None
-            found = False
-            i = 0
-            num_paths = len(paths)
-            box = graph.get_box()
-            while i < num_paths and not found:
-                if paths[i][0][1] > box[1][1]:
-                    full_path = paths[i][-2:0:-1]
-                    found = True
-                else:
-                    i += 1
-            Data.non_inter_cutoff = args.vary
-            res = graph.recalculate_path(full_path, interactions = args.interactions)
-            print(f"Recalculated G: {0.69478578545*res} for non-interacting width of {args.vary} Angstroms")
+            if args.random:
+                graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+                random_paths = graph.get_random_paths(args.random)
+                random_paths.append(get_best_path(paths, box = graph.get_box()))
+                f = open("random_paths.csv", "w")
+                f.write('\n'.join(map(str, random_paths)))
+                f.close()
+                plt.hist(random_paths, bins = 3)
+                plt.savefig("random_paths.png")
 
             
-
-        #visualize(graph, paths)
+    if not args.random:
+        visualize(graph, paths)
 
 
 

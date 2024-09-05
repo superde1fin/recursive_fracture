@@ -197,15 +197,16 @@ class FracGraph:
         Helper.mpi_print("Number of type groups:", Data.type_groups)
         self.__modify_potfile(interactions)
         self.__modify_struct()
-        starting_pe = self.__head.activate()
+        starting_pe = self.__head.activate(box = self.get_box())
         prev_node = self.__head
         for node_pos in path:
             node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr)
             self.__node_ctr += 1
-            node.activate(parent = prev_node)
+            node.activate(parent = prev_node, box = self.get_box())
+            #node.get_lmp().command(f"write_data out.{self.__node_ctr}.struct")
             prev_node = node
 
-        path_eng = self.__tail.activate(parent = node) - starting_pe
+        path_eng = self.__tail.activate(parent = node, box = self.get_box()) - starting_pe
 
 
         self.__tail.get_lmp().command(f"write_data {Data.non_inter_cutoff}_surface.structure")
@@ -255,7 +256,7 @@ class FracGraph:
         for i in range(to_do):
             path_energies.append(self.__find_rand_path())
             #self.__head.get_lmp().command(f"write_data test.{rank}.{i}.struct")
-            self.__head.deactivate()
+            self.__head.deactivate(box = self.get_box())
 
 
         gathered_values = comm.gather(path_energies, root = 0)
@@ -499,6 +500,7 @@ class FracGraph:
     def __modify_potfile(self, interactions):
         groups = Data.type_groups
         ntypes = Data.initial_types
+        print(ntypes)
         if interactions == "default":
             interactions = []
             for g in range(2, groups + 1):

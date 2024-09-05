@@ -301,9 +301,10 @@ def main():
                 res = graph.recalculate_path(full_path, interactions = args.interactions)
                 print(f"Recalculated G: {0.69478578545*res} for non-interacting width of {args.vary} Angstroms")
 
-            if args.random:
-                graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-                random_paths = graph.get_random_paths(args.random)
+        if args.random:
+            graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
+            random_paths = graph.get_random_paths(args.random)
+            if rank == 0:
                 random_paths.append(get_best_path(paths, box = graph.get_box()))
                 f = open("random_paths.csv", "w")
                 f.write('\n'.join(map(str, random_paths)))
@@ -312,8 +313,10 @@ def main():
                 plt.savefig("random_paths.png")
 
             
+    """
     if not args.random:
         visualize(graph, paths)
+    """
 
 
 

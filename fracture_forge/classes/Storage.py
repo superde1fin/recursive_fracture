@@ -8,6 +8,7 @@ class Data:
                 }
     non_inter_cutoff = 10
     use_pressure = False
+    boltzman = 0.00198716 #kcal/mol*kelvin
 
 class SystemParams:
     simulation_temp = 300

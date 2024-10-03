@@ -1,11 +1,12 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys, heapq, math, pickle, random
+import glob, os, sys, heapq, math, pickle, random, scipy
 import numpy as np
 import ctypes as ct
 import regex as re
 from mpi4py import MPI
 from classes.type_sets import Holder
+import mpmath as mp
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -179,9 +180,9 @@ class FracGraph:
 
     def __node_info_transform(self, node_info):
         if isinstance(node_info, dict):
-            return (node_info["path_energy"], node_info["node_id"], node_info["typeset_id"], node_info["parent_rank"], node_info["parent_id"], node_info["typeset_list"], node_info["surface_area"], node_info["theta"])
+            return (node_info["path_energy"], node_info["node_id"], node_info["typeset_id"], node_info["parent_rank"], node_info["parent_id"], node_info["typeset_list"], node_info["surface_area"], node_info["theta"], node_info["pe"])
         elif isinstance(node_info, tuple):
-            return {"path_energy" : node_info[0], "node_id" : node_info[1], "typeset_id" : node_info[2], "parent_rank" : node_info[3], "parent_id" : node_info[4], "typeset_list" : node_info[5], "surface_area" : node_info[6], "theta" : node_info[7]}
+            return {"path_energy" : node_info[0], "node_id" : node_info[1], "typeset_id" : node_info[2], "parent_rank" : node_info[3], "parent_id" : node_info[4], "typeset_list" : node_info[5], "surface_area" : node_info[6], "theta" : node_info[7], "pe": node_info[8]}
         else:
             raise RuntimeError(f"ERROR: Expected type dict or tuple not {type(node_info)}")
 
@@ -276,34 +277,55 @@ class FracGraph:
                 return list()
 
             Helper.print("-----------------------------------------------------")
-            Helper.print("Lowest node:", current_node["node_id"], "Eng:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current.get_pos(), "Rank:", rank)
-            current.reset_lowest(current_node["typeset_id"], current_node["parent_rank"], current_node["typeset_list"], current_node["surface_area"], current_node["theta"], self.__head)
+            Helper.print("Lowest node:", current_node["node_id"], "Path Probability:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current.get_pos(), "Rank:", rank)
+            current.reset_lowest(current_node["typeset_id"], current_node["parent_rank"], current_node["typeset_list"], current_node["surface_area"], current_node["theta"], self.__head, current_node["pe"])
             Helper.print("Saving datafile for node:", current_node["node_id"], "Ctr:", scan_ctr, "TID:", current.get_tid())
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
 
             if current.is_tail():
                 self.__tail.reset_tip()
                 self.__head.reset_tip()
-                Helper.print("Rank:", rank, "Surface area created:", 2*current.get_surface_area())
-                Helper.print("Rank:", rank, "Energy change:", current_node["path_energy"])
-                return current_node["path_energy"]/(2*current.get_surface_area())
+                Helper.print("Rank:", rank, "Surface area created:", current.get_surface_area())
+                #Helper.print("PE:", rank, self.__tail.get_pe())
+                #Helper.print("Rank:", rank, "Energy change:", current_node["path_energy"])
+                #return (self.__tail.get_pe() - self.__head.get_pe() + Data.boltzman*300*np.log(current_node["path_energy"])/(current.get_surface_area())
+                return current_node["path_energy"]
 
             new_nodes = list()
+            node_ids = list()
+            probs = list()
+            length_probs = 0
+            partition = mp.mpf(0)
             neighbors = current.get_neighbors()
-            for neighbor in neighbors:
+            box = self.get_box()
+            for i, neighbor in enumerate(neighbors):
                 neigh_id = neighbor.get_id()
                 if not neighbor.is_head() and neigh_id != current_node["parent_id"]:
-                    path_energy = neighbor.activate(box = self.get_box(), parent = current) - starting_pe
-                    step_eng = path_energy - energies[current_node["node_id"]]
-                    if step_eng < 0:
-                        path_energy = energies[current_node["node_id"]]
-                        step_eng = 0
-                    Helper.print("Looking at node:", neigh_id, "Eng:", path_energy, "Pos:", neighbor.get_pos(), "Rank:", rank)
-                    if path_energy < energies[neigh_id]:
-                        self.__paths[neigh_id] = (current_node["node_id"], path_energy)
-                        energies[neigh_id] = path_energy
-                        self.__step_energies[neigh_id] = (step_eng, path_energy)
-                        new_nodes.append({"path_energy" : path_energy, "node_id" : neigh_id, "typeset_id" : neighbor.get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbor.get_typeset_list(), "surface_area" : neighbor.get_surface_area(), "theta" : neighbor.get_theta()})
+                    part_piece = neighbor.activate(box = box, parent = current)
+                    node_ids.append(i)
+                    #node_data.append((part_piece, neigh_id, neighbor.get_pe(), neighbor.get_tid(), neighbor.get_typeset_list(), neighbor.get_surface_area(), neighbor.get_theta()))
+                    partition += part_piece
+                    probs.append(part_piece)
+                    length_probs += neighbor.get_cut_length()*part_piece
+
+            Helper.print(partition)
+            #Expectation value of the fracture propagation length
+            L = length_probs/partition
+
+            #for non_norm_p, neigh_id, pe, tid, tid_list, surface_area, theta in node_data:
+            for i, nid in enumerate(node_ids):
+                #L = neighbors[nid].get_cut_length()
+                neigh_id = neighbors[nid].get_id()
+                neighbors[nid].set_surface_area(L*(box[1][2] - box[0][2]))
+                step_prob = -probs[i]/partition
+                path_prob = -energies[current_node["node_id"]]*step_prob
+                Helper.print("Node:", neigh_id, energies[current_node["node_id"]], probs[i], step_prob, path_prob)
+                if path_prob < energies[neigh_id]:
+                    self.__paths[neigh_id] = (current_node["node_id"], path_prob)
+                    energies[neigh_id] = path_prob
+                    self.__step_energies[neigh_id] = (float(step_prob), path_prob)
+                    new_nodes.append({"path_energy" : path_prob, "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
+
             return new_nodes
 
 
@@ -314,14 +336,14 @@ class FracGraph:
 
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
-        starting_pe = self.__head.activate(box = self.get_box())
+        self.__head.activate(box = self.get_box())
 
         scan_ctr = 0
         if rank == 0:
             energies = {node_id : float("inf") for node_id in range(self.__node_ctr)}
             head = self.__head
-            energies[head.get_id()] = 0
-            head_data = {"path_energy" : 0, "node_id" : head.get_id(), "typeset_id" : head.get_tid(), "parent_rank" : None, "parent_id" : None, "typeset_list" : list(), "surface_area" : head.get_surface_area(), "theta" : head.get_theta()}
+            energies[head.get_id()] = -1
+            head_data = {"path_energy" : -1, "node_id" : head.get_id(), "typeset_id" : head.get_tid(), "parent_rank" : None, "parent_id" : None, "typeset_list" : list(), "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe()}
             priority_queue = [self.__node_info_transform(head_data)]
             done = False
             while priority_queue and not done:
@@ -351,7 +373,7 @@ class FracGraph:
                                     energies[node_info["node_id"]] = node_info["path_energy"]
                                     to_add.append(node_info)
                         else:
-                            to_add = answer
+                            #to_add = answer
                             done = True
 
 
@@ -365,11 +387,11 @@ class FracGraph:
 
         else:
             done = False
+            to_add = list()
             while not done:
                 energies = comm.recv(source = 0, tag = 0)
                 if not energies:
                     done = True
-                    to_add = 0
                 else:
                     energies = pickle.loads(energies)
                     current_node = pickle.loads(comm.recv(source = 0, tag = 1))
@@ -405,24 +427,30 @@ class FracGraph:
         """
 
         if not isinstance(to_add, list):
-            gathered = comm.gather(to_add, root = 0)
+            Helper.print("Not list:", rank, to_add)
+            gathered = comm.gather((to_add, self.__tail.get_pe()), root = 0)
         else:
             self.__tail.reset_tip()
             self.__head.reset_tip()
             gathered = comm.gather(None, root = 0)
 
         if rank == 0:
-            return next((item for item in gathered if item is not None), float("inf"))
+            prob, tail_eng = next((item for item in gathered if item is not None), float("inf"))
+            Helper.print("Energy diff:", tail_eng - self.__head.get_pe())
+            return prob
         else:
             return None
 
 
+        """
         if not isinstance(to_add, list):
             return to_add
+            #return np.array(((self.__tail.get_pe() - self.__head.get_pe())/self.__tail.get_surface_area(), ))
         else:
             self.__tail.reset_tip()
             self.__head.reset_tip()
             return float("inf")
+        """
 
     @Helper.linear_func
     def __rec_path_search(self, node_id, path):
@@ -500,7 +528,6 @@ class FracGraph:
     def __modify_potfile(self, interactions):
         groups = Data.type_groups
         ntypes = Data.initial_types
-        print(ntypes)
         if interactions == "default":
             interactions = []
             for g in range(2, groups + 1):
@@ -594,6 +621,9 @@ class Node:
             
 
     #Setters
+    def set_surface_area(self, dA):
+        self.__surface_area = self.__parent.__surface_area + dA
+
     def deactivate(self):
         self.__active = False
 
@@ -691,6 +721,9 @@ class Node:
     def get_typeset_list(self):
         return self.type_holder.get_typeset_list()
 
+    def get_cut_length(self):
+        return self.__cut_length
+
     #State functions
     def is_head(self):
         return self.__is_head
@@ -739,9 +772,10 @@ class Node:
             self.__lmp.command("compute stress_pa all stress/atom NULL")
             self.__lmp.command("compute stress_total all reduce sum c_stress_pa[1]")
 
-    def reset_lowest(self, typeset_id, parent_rank, typeset_list, surface_area, theta, head):
+    def reset_lowest(self, typeset_id, parent_rank, typeset_list, surface_area, theta, head, pe):
         self.type_holder = head.type_holder
         self.__lmp = head.__lmp
+        self.__pe = pe
         if not self.is_head():
             self.__surface_area = surface_area
             self.__theta = theta
@@ -780,8 +814,8 @@ class Node:
                 y_dist = Data.old_bounds[1] - par_pos[1]
                 x__dist = 0
 
-            dist = np.sqrt(x_dist**2 + y_dist**2)
-            self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
+            self.__cut_length = np.sqrt(x_dist**2 + y_dist**2)
+            #self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
 
             my_atoms = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
             types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
@@ -803,12 +837,17 @@ class Node:
 
         self.__lmp.command("run 0")
         self.__active = True
-        if Data.use_pressure:
-            print(self.__lmp.numpy.extract_compute("stress_total", 0, 0)/(9689.23*np.prod(box[1] - box[0])))
-            self.__pe = 0
+        self.__pe = self.__lmp.get_thermo("pe")
+
+        if self.__is_head:
+            return 1
         else:
-            self.__pe = self.__lmp.get_thermo("pe")
-        return self.__pe
+            pot_diff = self.__pe - self.__parent.__pe
+            print("Parent eng:", self.__parent.__pe, "Self eng:", self.__pe, "Pot diff:", pot_diff, -pot_diff/(Data.boltzman*SystemParams.simulation_temp))
+            if pot_diff >= 0:
+                return mp.exp(-pot_diff/(Data.boltzman*SystemParams.simulation_temp))
+            else:
+                return mp.mpf(0)
 
 
     def __new_types(self, my_atoms, types, natoms):

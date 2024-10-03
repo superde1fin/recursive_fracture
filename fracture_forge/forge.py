@@ -279,7 +279,8 @@ def main():
         else:
             data_dir = "out_files" 
             res = graph.calculate(data_dir)
-            Helper.mpi_print("G:",  0.69478578545*res)
+            #Helper.mpi_print("G:",  0.69478578545*res)
+            Helper.mpi_print("p:",  res)
         paths = None
     else:
         Helper.mpi_print("------------------------\nPath save file has been located. No calculation will be performed. To initiate new fracture path search delete the path_save.csv file\n------------------------")
@@ -313,10 +314,8 @@ def main():
                 plt.savefig("random_paths.png")
 
             
-    """
     if not args.random:
         visualize(graph, paths)
-    """
 
 
 

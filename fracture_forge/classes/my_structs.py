@@ -1,6 +1,6 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys, heapq, math, pickle, random, scipy
+import glob, os, sys, heapq, math, pickle, random
 import numpy as np
 import ctypes as ct
 import regex as re

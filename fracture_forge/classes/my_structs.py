@@ -310,7 +310,10 @@ class FracGraph:
 
             Helper.print(partition)
             #Expectation value of the fracture propagation length
-            L = length_probs/partition
+            if partition != 0:
+                L = length_probs/partition
+            else:
+                L = 0
 
             #for non_norm_p, neigh_id, pe, tid, tid_list, surface_area, theta in node_data:
             for i, nid in enumerate(node_ids):
@@ -427,7 +430,6 @@ class FracGraph:
         """
 
         if not isinstance(to_add, list):
-            Helper.print("Not list:", rank, to_add)
             gathered = comm.gather((to_add, self.__tail.get_pe()), root = 0)
         else:
             self.__tail.reset_tip()

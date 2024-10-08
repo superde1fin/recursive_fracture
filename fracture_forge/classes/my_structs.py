@@ -320,7 +320,10 @@ class FracGraph:
                 #L = neighbors[nid].get_cut_length()
                 neigh_id = neighbors[nid].get_id()
                 neighbors[nid].set_surface_area(L*(box[1][2] - box[0][2]))
-                step_prob = -probs[i]/partition
+                if partition != 0:
+                    step_prob = -probs[i]/partition
+                else:
+                    step_prob = 0
                 path_prob = -energies[current_node["node_id"]]*step_prob
                 Helper.print("Node:", neigh_id, energies[current_node["node_id"]], probs[i], step_prob, path_prob)
                 if path_prob < energies[neigh_id]:

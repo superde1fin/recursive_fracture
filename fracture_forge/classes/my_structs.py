@@ -346,7 +346,7 @@ class FracGraph:
 
         scan_ctr = 0
         if rank == 0:
-            energies = {node_id : float("inf") for node_id in range(self.__node_ctr)}
+            energies = {node_id : 0 for node_id in range(self.__node_ctr)}
             head = self.__head
             energies[head.get_id()] = -1
             head_data = {"path_energy" : -1, "node_id" : head.get_id(), "typeset_id" : head.get_tid(), "parent_rank" : None, "parent_id" : None, "typeset_list" : list(), "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe()}

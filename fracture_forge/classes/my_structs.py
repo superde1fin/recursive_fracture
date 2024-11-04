@@ -286,18 +286,15 @@ class FracGraph:
                 self.__head.reset_tip()
                 Helper.print("Rank:", rank, "Surface area created:", 2*current.get_surface_area())
                 Helper.print("Rank:", rank, "Energy change:", current_node["path_energy"])
-                return current_node["path_energy"]/(2*current.get_surface_area())
+                return current_node["path_energy"]/(current.get_surface_area())
 
             new_nodes = list()
             neighbors = current.get_neighbors()
             for neighbor in neighbors:
                 neigh_id = neighbor.get_id()
-                if not neighbor.is_head() and neigh_id != current_node["parent_id"]:
+                if not neighbor.is_head() and neigh_id != current_node["parent_id"] and neighbor.get_pos()[1] > current.get_pos()[1]:
                     path_energy = neighbor.activate(box = self.get_box(), parent = current) - starting_pe
                     step_eng = path_energy - energies[current_node["node_id"]]
-                    if step_eng < 0:
-                        path_energy = energies[current_node["node_id"]]
-                        step_eng = 0
                     Helper.print("Looking at node:", neigh_id, "Eng:", path_energy, "Pos:", neighbor.get_pos(), "Rank:", rank)
                     if path_energy < energies[neigh_id]:
                         self.__paths[neigh_id] = (current_node["node_id"], path_energy)

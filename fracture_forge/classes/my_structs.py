@@ -269,7 +269,10 @@ class FracGraph:
         else:
             return None
 
-    def __extend_neighbors(node):
+    def __extend_neighbors(self, node):
+        print("Extenging neighbors for", node)
+        disc_coords = node.get_pos()
+        box_x_side = self.__box[1][0] - self.__box[0][0]
         found_new = False
         max_y = -float("inf")
         for neigh in node.get_neighbors():
@@ -277,20 +280,48 @@ class FracGraph:
             if neigh_y > max_y:
                 max_y = neigh_y
 
-        disc_coords = node.get_pos()
-        prev_radius = max_y - disc_coords[1] 
-        num_bins = prev_radius/self.__grid_size
+        if max_y <= disc_coords[1]:
+            prev_radius = self.__dr
+        else:
+            prev_radius = max_y - disc_coords[1]
 
-        for i, x in enumerate(np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1)):
-            y = np.sqrt(prev_radius**2 - x**2)
-                neigh_coords = self.__discretize((x, y))
-                if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
+        num_bins = int(np.floor(prev_radius/self.__grid_size))
+        max_extension = max(self.__box[1][1] - disc_coords[1], self.__box[1][0] - disc_coords[0], self.__box[0][0] - disc_coords[0])
+        print("Maximum extension radius:", max_extension)
+
+
+        print("Previous radius:", prev_radius)
+        while prev_radius < max_extension and not found_new:
+            prev_radius += self.__grid_size
+            num_bins += 1
+            print("Number of bins:", num_bins, "New radius:", prev_radius)
+
+            new_neigh_layer = list()
+
+            x = disc_coords[0] - self.__grid_size*num_bins
+            for y in np.linspace(disc_coords[1], disc_coords[1] + self.__grid_size*(num_bins - 1), num_bins):
+                new_neigh_layer.append((x, y))
+            y = disc_coords[1] + self.__grid_size*(num_bins - 1)
+            for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, 2*num_bins + 1):
+                new_neigh_layer.append((x, y))
+            x = disc_coords[0] + self.__grid_size*num_bins
+            for y in np.linspace(disc_coords[1], disc_coords[1] + self.__grid_size*(num_bins - 1), num_bins):
+                new_neigh_layer.append((x, y))
+
+            for x, y in new_neigh_layer:
+                neigh_coords = tuple(self.__trunc(np.array([x, y]), 3))
+                print("New neigh coords:", neigh_coords)
+
+                if neigh_coords != disc_coords and neigh_coords in self.__node_hash and neigh_coords[1] > disc_coords[1]:
                     neigh_node =  self.__node_hash[neigh_coords]
                     Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
                     node.attach(neigh_node)
                     found_new = True
 
+
         return found_new
+
+
 
 
 
@@ -354,7 +385,7 @@ class FracGraph:
                     step_prob = 0
                 path_prob = -energies[current_node["node_id"]]*step_prob
                 Helper.print("Node:", neigh_id, energies[current_node["node_id"]], probs[i], step_prob, path_prob)
-                if path_prob < energies[neigh_id]:
+                if path_prob < energies[neigh_id] neighbors[nid].get_pos()[1] > current.get_pos()[1]:
                     self.__paths[neigh_id] = (current_node["node_id"], path_prob)
                     energies[neigh_id] = path_prob
                     self.__step_energies[neigh_id] = (float(step_prob), path_prob)
@@ -429,10 +460,12 @@ class FracGraph:
 
                 #If ran out of candidates try to add farther neighbors
                 if not priority_queue:
-                    found_neighs = self.__extend_neighbors(own_node)
+                    found_neighs = self.__extend_neighbors(self.__id_node_map[own_node["node_id"]])
                     if not found_neighs:
                         done = True
                         to_add = float("inf")
+                    else:
+                        heapq.heappush(priority_queue, self.__node_info_transform(own_node))
 
             #Stop other nodes iteration
             for i in range(1, size):
@@ -540,7 +573,7 @@ class FracGraph:
 
             num_bins = int(np.floor(self.__dr/self.__grid_size))
             for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1):
-                for y in np.linspace(disc_coords[1], disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
+                for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
                     neigh_coords = self.__discretize((x, y))
                     if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
                         neigh_node =  self.__node_hash[neigh_coords]

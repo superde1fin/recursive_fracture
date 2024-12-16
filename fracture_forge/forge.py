@@ -212,7 +212,7 @@ def vis_nodes(graph):
 def parser_call():
     parser = argparse.ArgumentParser()
     parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
-    parser.add_argument("-r", "--radius", type = int, default = SystemParams.dr, help = "Probe radius", metavar = "")
+    parser.add_argument("-r", "--radius", type = float, default = SystemParams.dr, help = "Probe radius", metavar = "")
     parser.add_argument("-e", "--error", type = int, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
     parser.add_argument("-i", "--interactions", action = "store_true", help = "Prompts the user to specify interactions between type groups")
     parser.add_argument("-s", "--structure", default = None, help = "System structure file in lammps format", metavar = "")
@@ -223,6 +223,7 @@ def parser_call():
     parser.add_argument("-v", "--vary", default = 0, help = "This value when specified changes the default non-interacting cutoff width. Only works with a present path_save.csv file generated after previous calculation.", metavar = "", type = float)
     parser.add_argument("-pr", "--pressure", default = False, help = "Calculate surface energy using pressure difference.", action = "store_true")
     parser.add_argument("-rd", "--random", default = 0, help = "Specifies the number of random paths throug a material to run. If this option is specified no path search will be performed.", metavar = "", type = int)
+    parser.add_argument("-nt", "--no_interaction_table", default = SystemParams.nono_table, help = "Path to the no interactions table. Has to include one entry labeled as NoNo with zeros throughout.", metavar = "", type = str)
     args = parser.parse_args()
 
     
@@ -255,11 +256,12 @@ def main():
     Data.structure_file = args.structure
     Data.potfile = args.force_field
     Data.non_inter_cutoff = args.width
+    
 
     if args.pressure:
         Data.use_pressure = True
 
-    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius)
+    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius, nono_table = args.no_interaction_table)
     if not os.path.isfile("path_save.csv"):
         graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
         #graph.build_test(interactions = args.interactions)

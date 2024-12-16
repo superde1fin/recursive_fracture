@@ -14,7 +14,8 @@ size = comm.Get_size()
 proc_self_comm = MPI.COMM_SELF
 
 class FracGraph:
-    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, ):
+    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, nono_table = ""):
+        self.__nono_table = nono_table
         self.__step_energies = dict()
         self.__dr = connection_radius
         self.__test_mode = test_mode
@@ -25,6 +26,7 @@ class FracGraph:
         self.__paths = dict()
         self.__id_node_map = list()
         self.__grid_size = error/np.sqrt(2)
+        #self.__sanity_list = list()
         if self.__dr < self.__grid_size:
             self.__dr = self.__grid_size*1.5
             Helper.mpi_print("Reset probe radius to allow for fracture graph connectivity")
@@ -129,7 +131,8 @@ class FracGraph:
         #Calculate simulation region sides
         sides = np.array([self.__box[1][0] - self.__box[0][0], self.__box[1][1] - self.__box[0][1], self.__box[1][2] - self.__box[0][2]])
 
-        head_divs = int(np.ceil(sides[0]/self.__dr))
+        #head_divs = int(np.ceil(sides[0]/self.__dr))
+        head_divs = int(np.ceil(sides[0]))
         head_step = sides[0]/head_divs
         head_nodes = dict()
         tail_nodes = dict()
@@ -266,6 +269,31 @@ class FracGraph:
         else:
             return None
 
+    def __extend_neighbors(node):
+        found_new = False
+        max_y = -float("inf")
+        for neigh in node.get_neighbors():
+            neigh_y = neigh.get_pos()[1]
+            if neigh_y > max_y:
+                max_y = neigh_y
+
+        disc_coords = node.get_pos()
+        prev_radius = max_y - disc_coords[1] 
+        num_bins = prev_radius/self.__grid_size
+
+        for i, x in enumerate(np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1)):
+            y = np.sqrt(prev_radius**2 - x**2)
+                neigh_coords = self.__discretize((x, y))
+                if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
+                    neigh_node =  self.__node_hash[neigh_coords]
+                    Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
+                    node.attach(neigh_node)
+                    found_new = True
+
+        return found_new
+
+
+
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         def dijkstra_step(energies, current_node, scan_ctr):
@@ -319,7 +347,7 @@ class FracGraph:
             for i, nid in enumerate(node_ids):
                 #L = neighbors[nid].get_cut_length()
                 neigh_id = neighbors[nid].get_id()
-                neighbors[nid].set_surface_area(L*(box[1][2] - box[0][2]))
+                neighbors[nid].set_surface_area(neighbors[nid].get_cut_length()*(box[1][2] - box[0][2]))
                 if partition != 0:
                     step_prob = -probs[i]/partition
                 else:
@@ -340,11 +368,24 @@ class FracGraph:
         Helper.action(os.mkdir, save_dir)
         comm.Barrier()
 
+        #Sanity check
+#        self.__sanity_list = np.array(self.__sanity_list)
+#        check_against = self.__sanity_list*size
+#        all_lists = np.empty_like(check_against)
+#        comm.Allreduce(self.__sanity_list, all_lists, op = MPI.SUM)
+#        sane = np.allclose(all_lists, check_against)
+#        if not sane:
+#            raise RuntimeError("Different coordinates associated with the same node on different processes")
+#        else:
+#            Helper.mpi_print("All node positions are equivalent")
+
+            
+
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
         self.__head.activate(box = self.get_box())
 
-        scan_ctr = 0
+        scan_ctr = -1
         if rank == 0:
             energies = {node_id : 0 for node_id in range(self.__node_ctr)}
             head = self.__head
@@ -352,7 +393,7 @@ class FracGraph:
             head_data = {"path_energy" : -1, "node_id" : head.get_id(), "typeset_id" : head.get_tid(), "parent_rank" : None, "parent_id" : None, "typeset_list" : list(), "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe()}
             priority_queue = [self.__node_info_transform(head_data)]
             done = False
-            while priority_queue and not done:
+            while not done:
                 own_node = self.__node_info_transform(heapq.heappop(priority_queue))
                 heap_ctr = 1
                 heap_size = len(priority_queue)
@@ -362,9 +403,8 @@ class FracGraph:
                     comm.send(pickle.dumps(current_node), dest = heap_ctr, tag = 1)
                     heap_ctr += 1
 
+                scan_ctr += 1
                 to_add = dijkstra_step(energies, own_node, scan_ctr)
-                if to_add:
-                    scan_ctr += 1
                 if not isinstance(to_add, list):
                     done = True
 
@@ -387,8 +427,18 @@ class FracGraph:
                     for node in to_add:
                         heapq.heappush(priority_queue, self.__node_info_transform(node))
 
+                #If ran out of candidates try to add farther neighbors
+                if not priority_queue:
+                    found_neighs = self.__extend_neighbors(own_node)
+                    if not found_neighs:
+                        done = True
+                        to_add = float("inf")
+
+            #Stop other nodes iteration
             for i in range(1, size):
                 comm.send(None, dest = i, tag = 0)
+
+
 
 
         else:
@@ -401,9 +451,8 @@ class FracGraph:
                 else:
                     energies = pickle.loads(energies)
                     current_node = pickle.loads(comm.recv(source = 0, tag = 1))
+                    scan_ctr += 1
                     to_add = dijkstra_step(energies, current_node, scan_ctr)
-                    if to_add:
-                        scan_ctr += 1
                     Helper.print(f"Rank {rank} sent result to head rank")
                     comm.send(pickle.dumps(to_add), dest = 0, tag = 2)
 
@@ -427,35 +476,22 @@ class FracGraph:
             comm.send(self.__paths, dest = 0, tag = 0)
             comm.send(self.__step_energies, dest = 0, tag = 1)
 
-        """
-        self.__paths = comm.bcast(self.__paths, root = 0)
-        self.__step_energies = comm.bcast(self.__step_energies, root = 0)
-        """
 
         if not isinstance(to_add, list):
-            gathered = comm.gather((to_add, self.__tail.get_pe()), root = 0)
+            gathered = comm.gather((to_add, self.__tail.get_pe(), self.__tail.get_surface_area()), root = 0)
         else:
             self.__tail.reset_tip()
             self.__head.reset_tip()
             gathered = comm.gather(None, root = 0)
 
         if rank == 0:
-            prob, tail_eng = next((item for item in gathered if item is not None), float("inf"))
+            prob, tail_eng, area = next((item for item in gathered if item is not None))
             Helper.print("Energy diff:", tail_eng - self.__head.get_pe())
+            Helper.print("G:", 0.69*(tail_eng - self.__head.get_pe())/area)
             return prob
         else:
             return None
 
-
-        """
-        if not isinstance(to_add, list):
-            return to_add
-            #return np.array(((self.__tail.get_pe() - self.__head.get_pe())/self.__tail.get_surface_area(), ))
-        else:
-            self.__tail.reset_tip()
-            self.__head.reset_tip()
-            return float("inf")
-        """
 
     @Helper.linear_func
     def __rec_path_search(self, node_id, path):
@@ -497,15 +533,19 @@ class FracGraph:
             new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr)
             self.__id_node_map.append(new_node)
             self.__node_hash[disc_coords] = new_node
-            Helper.mpi_print("Created a new node", self.__node_ctr)
+            #self.__sanity_list.append(disc_coords[0])
+            #self.__sanity_list.append(disc_coords[1])
+            Helper.mpi_print("Created a new node", self.__node_ctr, "at pos:", disc_coords)
             self.__node_ctr += 1
 
-        num_bins = int(np.floor(self.__dr/self.__grid_size))
-        for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1):
-            for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
-                neigh_coords = self.__discretize((x, y))
-                if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
-                    new_node.attach(self.__node_hash[neigh_coords])
+            num_bins = int(np.floor(self.__dr/self.__grid_size))
+            for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1):
+                for y in np.linspace(disc_coords[1], disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
+                    neigh_coords = self.__discretize((x, y))
+                    if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
+                        neigh_node =  self.__node_hash[neigh_coords]
+                        Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
+                        new_node.attach(neigh_node)
 
 
 
@@ -546,11 +586,21 @@ class FracGraph:
         if not os.path.isfile(name):
             text = open(self.__head.potfile, 'r').read()
             new_potfile = open(name, 'w')
+
+            #Check for hybrid potentials
+            pair_style_re = re.compile(r"^pair_style\s+hybrid", re.MULTILINE)
+            hybrid_handle = ""
+            if pair_style_re.findall(text):
+                hybrid_handle = "table"
+
             new_text = text + "\n\n#-------------------------\n\n"
+            new_text += f"variable      nono_table_path string \"{self.__nono_table}\""
             #t is type of atom
             for t in range(1, ntypes + 1):
+                #print("Looking at type:", t)
                 #g is group of types
                 for g in range(groups - 1):
+                    print("In group:", g)
                     mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
                     mass_line = mass_re.findall(new_text)[-1]
                     new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
@@ -558,6 +608,8 @@ class FracGraph:
 
                     #j is atom type greater than t (current type) used for pair combinations
                     for j in range(t, ntypes + 1):
+                        #print("Paired with type:", j)
+                        #print(f"^pair_coeff\s+{t}\s+{j}\s+.+$")
                         coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
                         #Add a pair_coeff line within current group
                         new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
@@ -570,10 +622,10 @@ class FracGraph:
                                     new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
                             else:
                                 tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}).+", "\ttable\t${table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
+                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}).+", "\t" + hybrid_handle + "\t${nono_table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
                                 if t != j:
                                     tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
-                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}).+", "\ttable\t${table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
+                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}).+", "\t" + hybrid_handle + "\t${nono_table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
                     
             general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
             if(general_type_re.search(new_text)):
@@ -620,7 +672,7 @@ class Node:
                 name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
                 self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
             self.__lmp.command(f"read_data {filename}")
-            self.__lmp.command(f"variable pot_dir string ../{'/'.join(self.potfile.split(r'/')[:-1])}")
+            self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}/../")
             self.type_holder = Holder(self.__lmp)
             self.__theta = np.pi/2
             
@@ -849,10 +901,7 @@ class Node:
         else:
             pot_diff = self.__pe - self.__parent.__pe
             print("Parent eng:", self.__parent.__pe, "Self eng:", self.__pe, "Pot diff:", pot_diff, -pot_diff/(Data.boltzman*SystemParams.simulation_temp))
-            if pot_diff >= 0:
-                return mp.exp(-pot_diff/(Data.boltzman*SystemParams.simulation_temp))
-            else:
-                return mp.mpf(0)
+            return mp.exp(-pot_diff/(Data.boltzman*SystemParams.simulation_temp))
 
 
     def __new_types(self, my_atoms, types, natoms):

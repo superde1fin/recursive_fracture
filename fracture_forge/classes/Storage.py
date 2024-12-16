@@ -18,6 +18,7 @@ class SystemParams:
     dtheta = 30
     pivot_type = 2
     neigh_num = 2
+    nono_table = "NoNo.table"
 
 class Helper:
     action_proc = 0

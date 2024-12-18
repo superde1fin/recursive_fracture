@@ -286,15 +286,16 @@ class FracGraph:
             prev_radius = max_y - disc_coords[1]
 
         num_bins = int(np.floor(prev_radius/self.__grid_size))
-        max_extension = max(self.__box[1][1] - disc_coords[1], self.__box[1][0] - disc_coords[0], self.__box[0][0] - disc_coords[0])
-        print("Maximum extension radius:", max_extension)
+        #max_extension = max(self.__box[1][1] - disc_coords[1], self.__box[1][0] - disc_coords[0], self.__box[0][0] - disc_coords[0])
+        max_extension = 2*self.__dr
+        #print("Maximum extension radius:", max_extension)
 
 
         print("Previous radius:", prev_radius)
         while prev_radius < max_extension and not found_new:
             prev_radius += self.__grid_size
             num_bins += 1
-            print("Number of bins:", num_bins, "New radius:", prev_radius)
+            print("Scanning radius:", prev_radius)
 
             new_neigh_layer = list()
 
@@ -310,9 +311,9 @@ class FracGraph:
 
             for x, y in new_neigh_layer:
                 neigh_coords = tuple(self.__trunc(np.array([x, y]), 3))
-                print("New neigh coords:", neigh_coords)
+                #print("New neigh coords:", neigh_coords)
 
-                if neigh_coords != disc_coords and neigh_coords in self.__node_hash and neigh_coords[1] > disc_coords[1]:
+                if neigh_coords != disc_coords and neigh_coords in self.__node_hash and neigh_coords[1] > disc_coords[1] and not self.__node_hash[neigh_coords].is_discarded():
                     neigh_node =  self.__node_hash[neigh_coords]
                     Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
                     node.attach(neigh_node)
@@ -323,20 +324,21 @@ class FracGraph:
 
 
 
-
-
-
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         def dijkstra_step(energies, current_node, scan_ctr):
             scan_ctr = scan_ctr*size + rank
+            box_x_side = self.__box[1][0] - self.__box[0][0]
 
             current = self.__id_node_map[current_node["node_id"]]
 
+            current_pos = current.get_pos()
+
             if current_node["path_energy"] > energies[current_node["node_id"]]:
-                return list()
+                print("Attomeped node porb:", -current_node["path_energy"], "Existing prob:", energies[current_node["node_id"]])
+                return list(), [current_node["node_id"]]
 
             Helper.print("-----------------------------------------------------")
-            Helper.print("Lowest node:", current_node["node_id"], "Path Probability:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current.get_pos(), "Rank:", rank)
+            Helper.print("Lowest node:", current_node["node_id"], "Path Probability:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current_pos, "Rank:", rank)
             current.reset_lowest(current_node["typeset_id"], current_node["parent_rank"], current_node["typeset_list"], current_node["surface_area"], current_node["theta"], self.__head, current_node["pe"])
             Helper.print("Saving datafile for node:", current_node["node_id"], "Ctr:", scan_ctr, "TID:", current.get_tid())
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
@@ -348,9 +350,10 @@ class FracGraph:
                 #Helper.print("PE:", rank, self.__tail.get_pe())
                 #Helper.print("Rank:", rank, "Energy change:", current_node["path_energy"])
                 #return (self.__tail.get_pe() - self.__head.get_pe() + Data.boltzman*300*np.log(current_node["path_energy"])/(current.get_surface_area())
-                return current_node["path_energy"]
+                return current_node["path_energy"], list()
 
             new_nodes = list()
+            discarded = list()
             node_ids = list()
             probs = list()
             length_probs = 0
@@ -385,13 +388,22 @@ class FracGraph:
                     step_prob = 0
                 path_prob = -energies[current_node["node_id"]]*step_prob
                 Helper.print("Node:", neigh_id, energies[current_node["node_id"]], probs[i], step_prob, path_prob)
-                if path_prob < energies[neigh_id] neighbors[nid].get_pos()[1] > current.get_pos()[1]:
+
+                neigh_coords = neighbors[nid].get_pos()
+
+                if path_prob < energies[neigh_id] and neighbors[nid].get_pos()[1] > current_pos[1]:
                     self.__paths[neigh_id] = (current_node["node_id"], path_prob)
                     energies[neigh_id] = path_prob
                     self.__step_energies[neigh_id] = (float(step_prob), path_prob)
                     new_nodes.append({"path_energy" : path_prob, "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
+                else:
+                    discarded.append(nid)
+                    neighbors[nid].discard()
 
-            return new_nodes
+            if not new_nodes:
+                new_nodes = [-1]
+
+            return new_nodes, discarded
 
 
         if os.path.isdir(save_dir):
@@ -424,7 +436,9 @@ class FracGraph:
             head_data = {"path_energy" : -1, "node_id" : head.get_id(), "typeset_id" : head.get_tid(), "parent_rank" : None, "parent_id" : None, "typeset_list" : list(), "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe()}
             priority_queue = [self.__node_info_transform(head_data)]
             done = False
-            while not done:
+            while not done and priority_queue:
+                terminal_nodes = list()
+                sent_nodes = list()
                 own_node = self.__node_info_transform(heapq.heappop(priority_queue))
                 heap_ctr = 1
                 heap_size = len(priority_queue)
@@ -433,22 +447,33 @@ class FracGraph:
                     comm.send(pickle.dumps(energies), dest = heap_ctr, tag = 0)
                     comm.send(pickle.dumps(current_node), dest = heap_ctr, tag = 1)
                     heap_ctr += 1
+                    sent_nodes.append(current_node)
 
                 scan_ctr += 1
-                to_add = dijkstra_step(energies, own_node, scan_ctr)
+                to_add, discarded = dijkstra_step(energies, own_node, scan_ctr)
+
                 if not isinstance(to_add, list):
                     done = True
+                elif to_add == [-1]:
+                    terminal_nodes.append(own_node)
+                    to_add = list()
 
                 for i in range(1, heap_ctr):
                     Helper.print(f"Waiting for response from rank {i}")
                     answer = pickle.loads(comm.recv(source = i, tag = 2))
+                    node_disc = pickle.loads(comm.recv(source = i, tag = 3))
+                    for disc_id in node_disc:
+                        self.__id_node_map[disc_id].discard()
                     if not done:
                         if isinstance(answer, list):
-                            for node_info in answer:
-                                #Check that the path energy passed from a different processer is lower than the existing one for the newly calulated node.
-                                if node_info["path_energy"] < energies[node_info["node_id"]]:
-                                    energies[node_info["node_id"]] = node_info["path_energy"]
-                                    to_add.append(node_info)
+                            if answer == [-1]:
+                                terminal_nodes.append(sent_nodes[i - 1])
+                            else:
+                                for node_info in answer:
+                                    #Check that the path energy passed from a different processer is lower than the existing one for the newly calulated node.
+                                    if node_info["path_energy"] < energies[node_info["node_id"]]:
+                                        energies[node_info["node_id"]] = node_info["path_energy"]
+                                        to_add.append(node_info)
                         else:
                             #to_add = answer
                             done = True
@@ -458,20 +483,16 @@ class FracGraph:
                     for node in to_add:
                         heapq.heappush(priority_queue, self.__node_info_transform(node))
 
-                #If ran out of candidates try to add farther neighbors
-                if not priority_queue:
-                    found_neighs = self.__extend_neighbors(self.__id_node_map[own_node["node_id"]])
-                    if not found_neighs:
-                        done = True
-                        to_add = float("inf")
-                    else:
-                        heapq.heappush(priority_queue, self.__node_info_transform(own_node))
+                #Give a second chance to the nodes without any fit neighbors
+                if terminal_nodes:
+                    for node in terminal_nodes:
+                        found_neighs = self.__extend_neighbors(self.__id_node_map[node["node_id"]])
+                        if found_neighs:
+                            heapq.heappush(priority_queue, self.__node_info_transform(own_node))
 
-            #Stop other nodes iteration
+
             for i in range(1, size):
                 comm.send(None, dest = i, tag = 0)
-
-
 
 
         else:
@@ -485,9 +506,10 @@ class FracGraph:
                     energies = pickle.loads(energies)
                     current_node = pickle.loads(comm.recv(source = 0, tag = 1))
                     scan_ctr += 1
-                    to_add = dijkstra_step(energies, current_node, scan_ctr)
+                    to_add, discarded = dijkstra_step(energies, current_node, scan_ctr)
                     Helper.print(f"Rank {rank} sent result to head rank")
                     comm.send(pickle.dumps(to_add), dest = 0, tag = 2)
+                    comm.send(pickle.dumps(discarded), dest = 0, tag = 3)
 
 
         comm.Barrier()
@@ -510,7 +532,7 @@ class FracGraph:
             comm.send(self.__step_energies, dest = 0, tag = 1)
 
 
-        if not isinstance(to_add, list):
+        if not isinstance(to_add, list) and self.__tail.is_active():
             gathered = comm.gather((to_add, self.__tail.get_pe(), self.__tail.get_surface_area()), root = 0)
         else:
             self.__tail.reset_tip()
@@ -518,7 +540,10 @@ class FracGraph:
             gathered = comm.gather(None, root = 0)
 
         if rank == 0:
-            prob, tail_eng, area = next((item for item in gathered if item is not None))
+            res = next((item for item in gathered if item is not None), None)
+            if res is None:
+                raise RuntimeError("Could not find a path from head to tail")
+            prob, tail_eng, area = res
             Helper.print("Energy diff:", tail_eng - self.__head.get_pe())
             Helper.print("G:", 0.69*(tail_eng - self.__head.get_pe())/area)
             return prob
@@ -571,10 +596,13 @@ class FracGraph:
             Helper.mpi_print("Created a new node", self.__node_ctr, "at pos:", disc_coords)
             self.__node_ctr += 1
 
+
             num_bins = int(np.floor(self.__dr/self.__grid_size))
             for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, num_bins*2 + 1):
                 for y in np.linspace(disc_coords[1] - self.__grid_size*num_bins, disc_coords[1] + self.__grid_size*num_bins, num_bins*2 + 1):
                     neigh_coords = self.__discretize((x, y))
+
+
                     if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
                         neigh_node =  self.__node_hash[neigh_coords]
                         Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
@@ -633,7 +661,7 @@ class FracGraph:
                 #print("Looking at type:", t)
                 #g is group of types
                 for g in range(groups - 1):
-                    print("In group:", g)
+                    #print("In group:", g)
                     mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
                     mass_line = mass_re.findall(new_text)[-1]
                     new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
@@ -681,6 +709,7 @@ class Node:
         self.__surface_area = 0
         self.__test_mode = test_mode
         self.__old_tip = None
+        self.__discarded = False
 
         if self.__is_head:
             self.__units = units
@@ -711,6 +740,9 @@ class Node:
             
 
     #Setters
+    def discard(self):
+        self.__discarded = True
+
     def set_surface_area(self, dA):
         self.__surface_area = self.__parent.__surface_area + dA
 
@@ -815,6 +847,9 @@ class Node:
         return self.__cut_length
 
     #State functions
+    def is_discarded(self):
+        return self.__discarded
+
     def is_head(self):
         return self.__is_head
 

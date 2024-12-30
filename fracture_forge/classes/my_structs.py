@@ -355,47 +355,33 @@ class FracGraph:
             new_nodes = list()
             discarded = list()
             node_ids = list()
-            probs = list()
-            length_probs = 0
-            partition = mp.mpf(0)
+            min_stress = float("inf")
+            max_path_load = list()
             neighbors = current.get_neighbors()
             box = self.get_box()
+            loads = list()
             for i, neighbor in enumerate(neighbors):
                 neigh_id = neighbor.get_id()
                 if not neighbor.is_head() and neigh_id != current_node["parent_id"]:
-                    part_piece = neighbor.activate(box = box, parent = current)
+                    normal_stress = neighbor.activate(box = box, parent = current)
+                    if normal_stress < min_stress:
+                        min_stress = normal_stress
+                    if normal_stress > current_node["path_energy"]:
+                        max_path_load.append(normal_stress)
+                    else:
+                        max_path_load.append(current_node["path_energy"])
+
+                    loads.append(normal_stress)
                     node_ids.append(i)
-                    #node_data.append((part_piece, neigh_id, neighbor.get_pe(), neighbor.get_tid(), neighbor.get_typeset_list(), neighbor.get_surface_area(), neighbor.get_theta()))
-                    partition += part_piece
-                    probs.append(part_piece)
-                    length_probs += neighbor.get_cut_length()*part_piece
 
-            Helper.print(partition)
-            #Expectation value of the fracture propagation length
-            if partition != 0:
-                L = length_probs/partition
-            else:
-                L = 0
-
-            #for non_norm_p, neigh_id, pe, tid, tid_list, surface_area, theta in node_data:
             for i, nid in enumerate(node_ids):
-                #L = neighbors[nid].get_cut_length()
                 neigh_id = neighbors[nid].get_id()
-                neighbors[nid].set_surface_area(neighbors[nid].get_cut_length()*(box[1][2] - box[0][2]))
-                if partition != 0:
-                    step_prob = -probs[i]/partition
-                else:
-                    step_prob = 0
-                path_prob = -energies[current_node["node_id"]]*step_prob
-                Helper.print("Node:", neigh_id, energies[current_node["node_id"]], probs[i], step_prob, path_prob)
-
                 neigh_coords = neighbors[nid].get_pos()
-
-                if path_prob < energies[neigh_id] and neighbors[nid].get_pos()[1] > current_pos[1]:
-                    self.__paths[neigh_id] = (current_node["node_id"], path_prob)
-                    energies[neigh_id] = path_prob
-                    self.__step_energies[neigh_id] = (float(step_prob), path_prob)
-                    new_nodes.append({"path_energy" : path_prob, "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
+                if loads[i] == min_stress and max_path_load[i] < energies[neigh_id] and neighbors[nid].get_pos()[1] > current_pos[1]:
+                    self.__paths[neigh_id] = (current_node["node_id"], max_path_load[i])
+                    energies[neigh_id] = max_path_load[i]
+                    self.__step_energies[neigh_id] = (loads[i], max_path_load[i])
+                    new_nodes.append({"path_energy" : max_path_load[i], "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
                 else:
                     discarded.append(nid)
                     neighbors[nid].discard()
@@ -940,7 +926,7 @@ class Node:
                 x__dist = 0
 
             self.__cut_length = np.sqrt(x_dist**2 + y_dist**2)
-            #self.__surface_area = self.__parent.get_surface_area() + dist*(box[1][2] - box[0][2])
+            self.__surface_area = self.__parent.get_surface_area() + self.__cut_length*(box[1][2] - box[0][2])
 
             my_atoms = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
             types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
@@ -965,11 +951,21 @@ class Node:
         self.__pe = self.__lmp.get_thermo("pe")
 
         if self.__is_head:
-            return 1
+            return 0
         else:
-            pot_diff = self.__pe - self.__parent.__pe
-            print("Parent eng:", self.__parent.__pe, "Self eng:", self.__pe, "Pot diff:", pot_diff, -pot_diff/(Data.boltzman*SystemParams.simulation_temp))
-            return mp.exp(-pot_diff/(Data.boltzman*SystemParams.simulation_temp))
+            nu = 0.25
+            E = 700 #Pa*10^8
+            R = 0.9 #Angstrom
+            a = self.__cut_length
+            G = 0.69*(self.__pe - self.__parent.get_pe())/self.__surface_area
+            if G < 0:
+                G = 0
+            #normal_stress = np.sqrt(G*E*(a + R)/((1-nu**2)*np.pi*a**2))
+            normal_stress = np.sqrt(G*E/((1-nu**2)*np.pi*a*(np.cos(np.pi/2 - self.__theta))**2))
+            self.__load = normal_stress
+            self.__G = G
+            return normal_stress
+
 
 
     def __new_types(self, my_atoms, types, natoms):

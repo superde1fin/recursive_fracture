@@ -622,9 +622,23 @@ class FracGraph:
                         if not node in self.__step_energies or eng_pair[-1] < self.__step_energies[node][-1]:
                             self.__step_energies[node] = eng_pair
             for key, value in self.__paths.items():
-                self.__paths[key] = [val[0] for val in value]
+                if key == self.__tail.get_id():
+                    appropriate_paths = list()
+                    for node_id, max_path_load in value:
+                        if if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
+                            appropriate_paths.append(node_id)
+                    self.__paths[key] = appropriate_paths
+                else:
+                    self.__paths[key] = [val[0] for val in value]
             for key, value in self.__step_energies.items():
-                self.__step_energies[key] = [val[0] for val in value]
+                if key == self.__tail.get_id():
+                    appropriate_paths = list()
+                    for step_eng, max_path_load in value:
+                        if if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
+                            appropriate_paths.append(step_eng)
+                    self.__step_energies[key] = appropriate_paths
+                else:
+                    self.__step_energies[key] = [val[0] for val in value]
 
 
             got_one = False

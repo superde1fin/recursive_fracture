@@ -625,7 +625,7 @@ class FracGraph:
                 if key == self.__tail.get_id():
                     appropriate_paths = list()
                     for node_id, max_path_load in value:
-                        if if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
+                        if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
                             appropriate_paths.append(node_id)
                     self.__paths[key] = appropriate_paths
                 else:
@@ -634,7 +634,7 @@ class FracGraph:
                 if key == self.__tail.get_id():
                     appropriate_paths = list()
                     for step_eng, max_path_load in value:
-                        if if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
+                        if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
                             appropriate_paths.append(step_eng)
                     self.__step_energies[key] = appropriate_paths
                 else:

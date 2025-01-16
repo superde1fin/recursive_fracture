@@ -93,9 +93,10 @@ def color_paths(graph, paths = None):
     unique_nodes = pd.unique(pd.DataFrame(paths).values.ravel())
     num_unique = len(unique_nodes)
     energies = np.array([tup[2] for tup in unique_nodes if tup])
-    #non_zero = [eng for eng in energies if eng != 0]
-    #min_eng, max_eng = np.percentile(non_zero, 5), np.percentile(non_zero, 95)
-    min_eng, max_eng = np.percentile(energies, 5), np.percentile(energies, 95)
+    non_zero = [eng for eng in energies if eng != 0]
+    if not non_zero:
+        raise RuntimeError("All paths have 0 G. Something went wrong")
+    min_eng, max_eng = np.percentile(non_zero, 5), np.percentile(non_zero, 95)
     
     box = graph.get_box()
     segments_per_cut = 100
@@ -104,7 +105,6 @@ def color_paths(graph, paths = None):
     ax = plt.gca()
     main_path_offset = 1
     found_at_least_one_full = False
-
     for npi, path in enumerate(paths):
         full_path = None
         #print(f"Colored {round(100*npi/(num_paths - 1), 2)}% of paths")
@@ -136,12 +136,10 @@ def color_paths(graph, paths = None):
 
 
             node_RGB = get_RGB(node_pos[2], min_eng, max_eng)
-            """
             if node_pos[2] == 0:
                 node_RGB = (0, 0, 0)
                 line_thickness = 1
                 line_transparency = 1
-            """
             parent_RGB = get_RGB(parent_pos[2], min_eng, max_eng)
             colors = create_gradient(parent_RGB, node_RGB, int(segments_per_cut/2))
             colors += [node_RGB]*(segments_per_cut - int(segments_per_cut/2))
@@ -151,7 +149,6 @@ def color_paths(graph, paths = None):
             visited.append(node_pos)
             
             i += 1
-
         final_path = False
 
         if full_path:
@@ -165,8 +162,7 @@ def color_paths(graph, paths = None):
 
             node = (path[-1][0], box[0][1])
             line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
-            #print("Line length:", line_length)
-
+            print("Line length:", line_length)
     if not found_at_least_one_full:
         raise RuntimeError("Error: No full path was found, something went wrong")
 
@@ -178,6 +174,13 @@ def color_paths(graph, paths = None):
 
 @Helper.linear_func
 def visualize(graph, paths = None):
+    """
+    nodes = graph.flatten()
+    points = np.array([node.get_pos() for node in nodes])
+
+    x = points[:, 0]
+    y = points[:, 1]
+    """
 
     color_paths(graph, paths)
 
@@ -211,6 +214,7 @@ def vis_nodes(graph):
 def parser_call():
     parser = argparse.ArgumentParser()
     parser.add_argument("-t", "--temperature", type = int, default = SystemParams.simulation_temp, help = "Temperature used in the initial velocity command", metavar = '')
+    parser.add_argument("-u", "--units", type = str, default = SystemParams.default_units, help = "Units that the potential supports.", metavar = '')
     parser.add_argument("-l", "--load_margin", type = float, default = SystemParams.load_margin, help = "Simulates load factor incremental step (error of experiment).", metavar = '')
     parser.add_argument("-r", "--radius", type = float, default = SystemParams.dr, help = "Probe radius", metavar = "")
     parser.add_argument("-e", "--error", type = int, default = SystemParams.error, help = "Radius within which the nodes of a fracture tree are considered to be equivalent", metavar = "")
@@ -262,7 +266,7 @@ def main():
     if args.pressure:
         Data.use_pressure = True
 
-    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius, nono_table = args.no_interaction_table, load_margin = args.load_margin)
+    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius, nono_table = args.no_interaction_table, load_margin = args.load_margin, units = args.units)
     if not os.path.isfile("path_save.csv"):
         if args.arbitrary_grid:
             graph.build_arbitrary(interactions = args.interactions)
@@ -296,7 +300,6 @@ def main():
                 i = 0
                 num_paths = len(paths)
                 box = graph.get_box()
-                """
                 while i < num_paths and not found:
                     if paths[i][0][1] > box[1][1]:
                         full_path = paths[i][-2:0:-1]
@@ -306,7 +309,6 @@ def main():
                 Data.non_inter_cutoff = args.vary
                 res = graph.recalculate_path(full_path, interactions = args.interactions)
                 print(f"Recalculated G: {0.69478578545*res} for non-interacting width of {args.vary} Angstroms")
-                """
 
         if args.random:
             graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)

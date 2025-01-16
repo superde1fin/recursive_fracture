@@ -14,15 +14,16 @@ size = comm.Get_size()
 proc_self_comm = MPI.COMM_SELF
 
 class FracGraph:
-    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, nono_table = "", load_margin = 0):
+    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, nono_table = "", load_margin = 0, units = "real"):
+        self.__units = units
         self.__load_margin = load_margin
         self.__nono_table = nono_table
         self.__step_energies = dict()
         self.__dr = connection_radius
         self.__test_mode = test_mode
-        self.__head = Node(is_head = True, test_mode = self.__test_mode)
+        self.__head = Node(is_head = True, test_mode = self.__test_mode, units = self.__units)
         self.__head.set_parent(None)
-        self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1)
+        self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1, units = self.__units)
         self.__node_ctr = 2
         self.__paths = dict()
         self.__id_node_map = list()
@@ -97,7 +98,6 @@ class FracGraph:
         grid_coords = self.__grid_size*np.around(rel_coords/self.__grid_size) + self.__box[0][:-1]
         grid_coords -= (grid_coords > self.__box[1][:-1])*self.__grid_size
         return tuple(self.__trunc(grid_coords, 3))
-        return tuple(grid_coords)
 
     def build_test(self, interactions):
         if interactions == "default":
@@ -143,12 +143,16 @@ class FracGraph:
         margins = (sides[:-1] - num_grid_points*node_grid)/2
         x_span = np.linspace(box[0][0] + margins[0], box[1][0] - margins[0], num_grid_points[0] + 1)
         y_span = np.linspace(box[0][1] + margins[1], box[1][1] - margins[1], num_grid_points[1] + 1)
+        min_y = y_span[0]
+        max_y = y_span[-1]
+        np.random.shuffle(x_span)
+        np.random.shuffle(y_span)
         for y in y_span:
             for x in x_span:
                 node = self.attach(coords = np.array((x, y)))
-                if y == y_span[0]:
+                if y == min_y:
                     self.__head.attach(node)
-                if y == y_span[-1]:
+                if y == max_y:
                     self.__tail.attach(node)
                 disc_coords = node.get_pos()
                 node_pos = int(np.floor((disc_coords[0] - box[0][0])/head_step))
@@ -286,7 +290,7 @@ class FracGraph:
         starting_pe = self.__head.activate(box = self.get_box())
         prev_node = self.__head
         for node_pos in path:
-            node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr)
+            node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr, units = self.__units)
             self.__node_ctr += 1
             node.activate(parent = prev_node, box = self.get_box())
             #node.get_lmp().command(f"write_data out.{self.__node_ctr}.struct")
@@ -416,23 +420,27 @@ class FracGraph:
             current_pos = current.get_pos()
 
             if current_node["path_energy"] > energies[current_node["node_id"]]:
-                print(f"Attemped node {current_node['node_id']} with load:", current_node["path_energy"], "Existing max path load:", energies[current_node["node_id"]])
+                print(f"Attempted node {current_node['node_id']} with load:", current_node["path_energy"], "Existing max path load:", energies[current_node["node_id"]])
                 return list(), [current_node["node_id"]]
 
             Helper.print("-----------------------------------------------------")
             Helper.print("Lowest node:", current_node["node_id"], "Path Load:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current_pos, "Rank:", rank)
             current.reset_lowest(current_node["typeset_id"], current_node["parent_rank"], current_node["typeset_list"], current_node["surface_area"], current_node["theta"], self.__head, current_node["pe"])
             Helper.print("Saving datafile for node:", current_node["node_id"], "Ctr:", scan_ctr, "TID:", current.get_tid())
-            #current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
+            current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
 
             if current.is_tail():
                 self.__tail.reset_tip()
                 self.__head.reset_tip()
-                Helper.print("Rank:", rank, "Surface area created:", current.get_surface_area())
-                #Helper.print("PE:", rank, self.__tail.get_pe())
-                #Helper.print("Rank:", rank, "Energy change:", current_node["path_energy"])
-                #return (self.__tail.get_pe() - self.__head.get_pe() + Data.boltzman*300*np.log(current_node["path_energy"])/(current.get_surface_area())
-                return {"load": current_node["path_energy"], "pe" : current_node["pe"], "area": current_node["surface_area"]}, list()
+                paths_available = os.listdir("final_paths")
+                if paths_available:
+                    ctr = max([int(struct.split('.')[0]) for struct in paths_available]) + 1
+                else:
+                    ctr = 0
+
+                Helper.print("writing datafile with ctr:", ctr)
+                current.get_lmp().command(f"write_data final_paths/{ctr}.struct")
+                return {"load": current_node["path_energy"], "pe" : current_node["pe"], "area": current_node["surface_area"], "ctr": ctr}, list()
 
             new_nodes = list()
             discarded = list()
@@ -471,9 +479,9 @@ class FracGraph:
                     energies[neigh_id] = max_path_load[i]
                     self.__step_energies[neigh_id] = [(loads[i], max_path_load[i])]
                     new_nodes.append({"path_energy" : max_path_load[i], "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
-                    Helper.print(f"Node {neigh_id} was accepted")
+                    Helper.print(f"Node {neigh_id} was accepted with path load of {max_path_load[i]}")
                 else:
-                    Helper.print(f"Node {neigh_id} was rejected, Path Max Load: {energies[neigh_id]}")
+                    Helper.print(f"Node {neigh_id} was rejected with path load of {max_path_load[i]}, existing path load: {energies[neigh_id]}")
                     discarded.append(nid)
                     neighbors[nid].discard()
 
@@ -482,13 +490,14 @@ class FracGraph:
 
             return new_nodes, discarded
 
+        if os.path.isdir("final_paths"):
+            Helper.action(os.system, "rm -r final_paths")
+        Helper.action(os.mkdir, "final_paths")
 
-        """
         if os.path.isdir(save_dir):
             Helper.action(os.system, f"rm -r {save_dir}")
         Helper.action(os.mkdir, save_dir)
         comm.Barrier()
-        """
 
         #Sanity check
 #        self.__sanity_list = np.array(self.__sanity_list)
@@ -520,6 +529,7 @@ class FracGraph:
             terminal_nodes = list()
             terminal_scan = False
             while priority_queue:
+                #Helper.print("Node Heap:", [self.__id_node_map[node[1]] for node in priority_queue])
                 sent_nodes = list()
                 own_node = self.__node_info_transform(heapq.heappop(priority_queue))
                 heap_ctr = 1
@@ -576,6 +586,7 @@ class FracGraph:
                     heapq.heappush(priority_queue, self.__node_info_transform(node))
 
                 #Give a second chance to the nodes without any fit neighbors
+                """
                 if terminal_nodes and not priority_queue:
                     terminal_scan = True
                     while terminal_nodes:
@@ -583,6 +594,7 @@ class FracGraph:
                         found_neighs = self.__extend_neighbors(self.__id_node_map[node["node_id"]])
                         if found_neighs:
                             heapq.heappush(priority_queue, self.__node_info_transform(node))
+                """
 
 
             for i in range(1, size):
@@ -650,6 +662,10 @@ class FracGraph:
                     Helper.print("G:", 0.69*(tail["pe"] - self.__head.get_pe())/tail["area"])
                     Helper.print("Load factor:", tail["load"])
 
+                else:
+                    Helper.print("removing datafile with ctr:", ctr)
+                    os.remove(f"final_paths/{tail['ctr']}.struct")
+
             if not got_one:
                 raise RuntimeError("No path from head node to tail node was found.")
                     
@@ -698,7 +714,7 @@ class FracGraph:
         if disc_coords in self.__node_hash:
             new_node = self.__node_hash[disc_coords]
         else:
-            new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr)
+            new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr, units = self.__units)
             self.__id_node_map.append(new_node)
             self.__node_hash[disc_coords] = new_node
             #self.__sanity_list.append(disc_coords[0])
@@ -996,17 +1012,6 @@ class Node:
         self.__lmp.command("neighbor 2.0 bin")
         self.__lmp.command("neigh_modify every 1 delay 0")
 
-    def __visualization(self, thermo_step = 1, dump_step = 1):
-        #self.__lmp.command(f"thermo {thermo_step}")
-        #self.__lmp.command("thermo_style custom step temp etotal pe vol density pxx pyy pzz")
-        #self.__lmp.command("thermo_modify flush yes")
-
-        #Computes
-        self.__lmp.command("compute pe_pa all pe/atom")
-        if Data.use_pressure:
-            self.__lmp.command("compute stress_pa all stress/atom NULL")
-            self.__lmp.command("compute stress_total all reduce sum c_stress_pa[1]")
-
     def reset_lowest(self, typeset_id, parent_rank, typeset_list, surface_area, theta, head, pe):
         self.type_holder = head.type_holder
         self.__lmp = head.__lmp
@@ -1029,7 +1034,6 @@ class Node:
                 self.__lmp.command(f"atom_modify map yes")
                 self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
-                self.__visualization()
                 self.__typeset_id = 0
                 Helper.mpi_print("Head node activated")
         else:
@@ -1071,6 +1075,8 @@ class Node:
             except:
                 pass
 
+
+
         self.__lmp.command("run 0")
         self.__active = True
         self.__pe = self.__lmp.get_thermo("pe")
@@ -1089,7 +1095,7 @@ class Node:
             self.__load = normal_stress
             self.__G = G
 
-        Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}, Rank: {rank}, Step G: {self.__G}, Load: {self.__load}")
+        Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}, Rank: {rank}, Step G: {self.__G}, Load: {self.__load}, PotEng: {self.__pe}")
         return self.__load
 
 

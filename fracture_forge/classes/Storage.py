@@ -19,6 +19,7 @@ class SystemParams:
     pivot_type = 2
     neigh_num = 2
     nono_table = "NoNo.table"
+    default_units = "real"
 
 class Helper:
     action_proc = 0

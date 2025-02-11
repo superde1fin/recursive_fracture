@@ -28,6 +28,13 @@ class Helper:
         if MPI.COMM_WORLD.Get_rank() == Helper.action_proc:
             print(*args)
             sys.stdout.flush()
+    """
+    @staticmethod
+    def mpi_print(*args):
+        print(f"{MPI.COMM_WORLD.Get_rank()}: ", *args)
+        sys.stdout.flush()
+    """
+
 
     @staticmethod
     def print(*args):

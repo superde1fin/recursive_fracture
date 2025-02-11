@@ -1,34 +1,31 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys, heapq, math, pickle, random
+import glob, os, sys, heapq, random
 import numpy as np
 import ctypes as ct
 import regex as re
 from mpi4py import MPI
-from classes.type_sets import Holder
-import mpmath as mp
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
-proc_self_comm = MPI.COMM_SELF
+proc_self_comm = comm
 
 class FracGraph:
-    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, nono_table = "", load_margin = 0, units = "real"):
+    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, nono_table = "", load_margin = 0, units = "real", minimize = False):
         self.__units = units
         self.__load_margin = load_margin
         self.__nono_table = nono_table
         self.__step_energies = dict()
         self.__dr = connection_radius
         self.__test_mode = test_mode
-        self.__head = Node(is_head = True, test_mode = self.__test_mode, units = self.__units)
+        self.__head = Node(is_head = True, test_mode = self.__test_mode, units = self.__units, minimize = minimize)
         self.__head.set_parent(None)
         self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1, units = self.__units)
         self.__node_ctr = 2
         self.__paths = dict()
         self.__id_node_map = list()
         self.__grid_size = error/np.sqrt(2)
-        #self.__sanity_list = list()
         if self.__dr < self.__grid_size:
             self.__dr = self.__grid_size*1.5
             Helper.mpi_print("Reset probe radius to allow for fracture graph connectivity")
@@ -65,10 +62,6 @@ class FracGraph:
         self.__step_energies[self.__head.get_id()] = [(0, 0)]
 
     #Getters
-    """
-    def get_eng_bounds(self):
-        return max(self.__step_energies.values()), min(self.__step_energies.values())
-    """
 
     def get_box(self):
         atom_box = tuple(self.__box)
@@ -107,11 +100,16 @@ class FracGraph:
 
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        self.__modify_potfile(interactions)
-        self.__modify_struct()
-        node = self.attach(coords = (20, 20))
-        self.__head.attach(node)
-        node.attach(self.__tail)
+        """
+        node1 = self.attach(coords = (5, 5))
+        node2 = self.attach(coords = (30, 20))
+        node3 = self.attach(coords = (5, 39))
+        self.__head.attach(node1)
+        node1.attach(node2)
+        node2.attach(node3)
+        node3.attach(self.__tail)
+        """
+        self.__head.attach(self.__tail)
 
     def build_arbitrary(self, interactions = "default"):
         if interactions == "default":
@@ -122,16 +120,12 @@ class FracGraph:
         Helper.mpi_print("Number of type groups:", Data.type_groups)
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        self.__modify_potfile(interactions)
-        self.__modify_struct()
         head_lmp = self.__head.get_lmp()
 
         box = self.get_box()
 
-        #Calculate simulation region sides
         sides = box[1] - box[0]
 
-        #head_divs = int(np.ceil(sides[0]/self.__dr))
         head_divs = int(np.ceil(sides[0]))
         head_step = sides[0]/head_divs
         head_nodes = dict()
@@ -182,8 +176,6 @@ class FracGraph:
 
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        self.__modify_potfile(interactions)
-        self.__modify_struct()
         head_lmp = self.__head.get_lmp()
 
         #Calculate simulation region sides
@@ -200,8 +192,8 @@ class FracGraph:
         types = np.array(head_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
         ids = np.array(head_lmp.gather_atoms("id", 0, 1), dtype = ct.c_int)
 
-        Helper.print(f"Head y position: {self.__head.get_pos()[1]}")
-        Helper.print("Scanning radius:", self.__dr)
+        Helper.mpi_print(f"Head y position: {self.__head.get_pos()[1]}")
+        Helper.mpi_print("Scanning radius:", self.__dr)
 
         #Cycle through the local ids of atoms with the oxygen type
         for pid in np.where(types == pivot_atom_type)[0]:
@@ -239,39 +231,33 @@ class FracGraph:
 
         head_y_pos = self.__head.get_pos()[1]
         head_neigh_positions = np.array([node.get_pos()[1] - head_y_pos for node in head_nodes.values()])
-        Helper.print(head_neigh_positions)
         mean = np.mean(head_neigh_positions)
         std_dev = np.std(head_neigh_positions)
-        Helper.print(mean, std_dev)
         for i, head_neigh in enumerate(head_nodes.values()):
             if std_dev != 0:
                 Z = (head_neigh_positions[i] - mean)/std_dev
             else:
                 Z = 0
-            Helper.print("Z score for head neighbor", head_neigh, "is", Z)
             if Z < 2:
                 self.__head.attach(head_neigh)
 
         tail_y_pos = self.__tail.get_pos()[1]
         tail_neigh_positions = np.array([tail_y_pos - node.get_pos()[1] for node in tail_nodes.values()])
-        Helper.print(tail_neigh_positions)
         mean = np.mean(tail_neigh_positions)
         std_dev = np.std(tail_neigh_positions)
-        Helper.print(mean, std_dev)
         for i, tail_neigh in enumerate(tail_nodes.values()):
             if std_dev != 0:
                 Z = (tail_neigh_positions[i] - mean)/std_dev
             else:
                 Z = 0
-            Helper.print("Z score for tail neighbor", tail_neigh, "is", Z)
             if Z < 2:
                 self.__tail.attach(tail_neigh)
 
     def __node_info_transform(self, node_info):
         if isinstance(node_info, dict):
-            return (node_info["path_energy"], node_info["node_id"], node_info["typeset_id"], node_info["parent_rank"], node_info["parent_id"], node_info["typeset_list"], node_info["surface_area"], node_info["theta"], node_info["pe"])
+            return (node_info["strongest_link"], node_info["node_id"], node_info["parent_id"], node_info["surface_area"], node_info["theta"], node_info["pe"], node_info["walls"])
         elif isinstance(node_info, tuple):
-            return {"path_energy" : node_info[0], "node_id" : node_info[1], "typeset_id" : node_info[2], "parent_rank" : node_info[3], "parent_id" : node_info[4], "typeset_list" : node_info[5], "surface_area" : node_info[6], "theta" : node_info[7], "pe": node_info[8]}
+            return {"strongest_link" : node_info[0], "node_id" : node_info[1], "parent_id" : node_info[2], "surface_area" : node_info[3], "theta" : node_info[4], "pe": node_info[5], "walls": node_info[6]}
         else:
             raise RuntimeError(f"ERROR: Expected type dict or tuple not {type(node_info)}")
 
@@ -285,23 +271,20 @@ class FracGraph:
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
 
         Helper.mpi_print("Number of type groups:", Data.type_groups)
-        self.__modify_potfile(interactions)
-        self.__modify_struct()
         starting_pe = self.__head.activate(box = self.get_box())
         prev_node = self.__head
         for node_pos in path:
             node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr, units = self.__units)
             self.__node_ctr += 1
             node.activate(parent = prev_node, box = self.get_box())
-            #node.get_lmp().command(f"write_data out.{self.__node_ctr}.struct")
             prev_node = node
 
         path_eng = self.__tail.activate(parent = node, box = self.get_box()) - starting_pe
 
 
         self.__tail.get_lmp().command(f"write_data {Data.non_inter_cutoff}_surface.structure")
-        Helper.print("Surface area created:", 2*self.__tail.get_surface_area())
-        Helper.print("Energy change:", path_eng)
+        Helper.mpi_print("Surface area created:", 2*self.__tail.get_surface_area())
+        Helper.mpi_print("Energy change:", path_eng)
 
         return path_eng/(2*self.__tail.get_surface_area())
 
@@ -321,12 +304,9 @@ class FracGraph:
             neigh_ctr = 0
             num_neghs = len(neighbors)
             prev_node = node
-            #Helper.print("Looking for neighbors of node:", prev_node.get_id())
             while not found_node:
                 node = random.choice(neighbors)
-                #Helper.print("Trying to pick node:", node.get_id())
                 if not node.get_id() in visited and node.get_pos()[1] > prev_node.get_pos()[1]:
-                    #Helper.print("PICKED")
                     found_node = True
                 else:
                     neigh_ctr += 1
@@ -345,7 +325,6 @@ class FracGraph:
 
         for i in range(to_do):
             path_energies.append(self.__find_rand_path())
-            #self.__head.get_lmp().command(f"write_data test.{rank}.{i}.struct")
             self.__head.deactivate(box = self.get_box())
 
 
@@ -372,9 +351,7 @@ class FracGraph:
             prev_radius = max_y - disc_coords[1]
 
         num_bins = int(np.floor(prev_radius/self.__grid_size))
-        #max_extension = max(self.__box[1][1] - disc_coords[1], self.__box[1][0] - disc_coords[0], self.__box[0][0] - disc_coords[0])
         max_extension = 2*self.__dr
-        #print("Maximum extension radius:", max_extension)
 
 
         print("Previous radius:", prev_radius)
@@ -397,7 +374,6 @@ class FracGraph:
 
             for x, y in new_neigh_layer:
                 neigh_coords = tuple(self.__trunc(np.array([x, y]), 3))
-                #print("New neigh coords:", neigh_coords)
 
                 if neigh_coords != disc_coords and neigh_coords in self.__node_hash and neigh_coords[1] > disc_coords[1] and not self.__node_hash[neigh_coords].is_discarded():
                     neigh_node =  self.__node_hash[neigh_coords]
@@ -412,28 +388,37 @@ class FracGraph:
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         def dijkstra_step(energies, current_node, scan_ctr):
-            scan_ctr = scan_ctr*size + rank
             box_x_side = self.__box[1][0] - self.__box[0][0]
 
             current = self.__id_node_map[current_node["node_id"]]
 
             current_pos = current.get_pos()
 
-            if current_node["path_energy"] > energies[current_node["node_id"]]:
-                print(f"Attempted node {current_node['node_id']} with load:", current_node["path_energy"], "Existing max path load:", energies[current_node["node_id"]])
+            if current_node["strongest_link"] > energies[current_node["node_id"]]:
+                print(f"Attempted node {current_node['node_id']} with load:", current_node["strongest_link"], "Existing max path load:", energies[current_node["node_id"]])
                 return list(), [current_node["node_id"]]
 
-            Helper.print("-----------------------------------------------------")
-            Helper.print("Lowest node:", current_node["node_id"], "Path Load:", current_node["path_energy"], "Parent:", current_node["parent_id"], "Pos:", current_pos, "Rank:", rank)
-            current.reset_lowest(current_node["typeset_id"], current_node["parent_rank"], current_node["typeset_list"], current_node["surface_area"], current_node["theta"], self.__head, current_node["pe"])
-            Helper.print("Saving datafile for node:", current_node["node_id"], "Ctr:", scan_ctr, "TID:", current.get_tid())
+            Helper.mpi_print("-----------------------------------------------------")
+            Helper.mpi_print("Lowest node:", current_node["node_id"], "Path Load:", current_node["strongest_link"], "Parent:", current_node["parent_id"], "Pos:", current_pos)
+            current.reset_lowest(current_node["surface_area"], current_node["theta"], self.__head, current_node["pe"], current_node["walls"])
+
+
             current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
+
 
             if current.is_tail():
                 self.__tail.reset_tip()
                 self.__head.reset_tip()
-                return {"load": current_node["path_energy"], "pe" : current_node["pe"], "area": current_node["surface_area"], "ctr": ctr}, list()
->>>>>>> fracture_part
+                paths_available = os.listdir("final_paths")
+                if paths_available:
+                    ctr = max([int(struct.split('.')[0]) for struct in paths_available]) + 1
+                else:
+                    ctr = 0
+
+                Helper.mpi_print("writing tail datafile with ctr:", ctr)
+                current.get_lmp().command(f"write_data final_paths/{ctr}.struct")
+                current.take_walls_down()
+                return {"load": current_node["strongest_link"], "pe" : current_node["pe"], "area": current_node["surface_area"], "ctr": ctr}, list()
 
             new_nodes = list()
             discarded = list()
@@ -445,19 +430,19 @@ class FracGraph:
             loads = list()
             for i, neighbor in enumerate(neighbors):
                 neigh_id = neighbor.get_id()
-                if not neighbor.is_head() and neigh_id != current_node["parent_id"]:
+                if not neighbor.is_head() and neigh_id != current_node["parent_id"] and neighbor.get_pos()[1] > current_pos[1]:
                     normal_stress = neighbor.activate(box = box, parent = current)
                     if normal_stress < min_stress:
                         min_stress = normal_stress
-                    if normal_stress > current_node["path_energy"]:
+                    if normal_stress > current_node["strongest_link"]:
                         max_path_load.append(normal_stress)
                     else:
-                        max_path_load.append(current_node["path_energy"])
+                        max_path_load.append(current_node["strongest_link"])
 
                     loads.append(normal_stress)
                     node_ids.append(i)
 
-            Helper.print(f"Current minimum completed path load {self.__min_complete_load}")
+            Helper.mpi_print(f"Current minimum completed path load {self.__min_complete_load}")
 
             for i, nid in enumerate(node_ids):
                 neigh_id = neighbors[nid].get_id()
@@ -465,21 +450,24 @@ class FracGraph:
                 if neighbors[nid].is_tail() and (neigh_id in self.__paths) and max_path_load[i] <= self.__min_complete_load + self.__load_margin:
                     self.__paths[neigh_id].append((current_node["node_id"], max_path_load[i]))
                     self.__step_energies[neigh_id].append((loads[i], max_path_load[i]))
-                    Helper.print("New tail found with parent:", current_node["node_id"])
-                    new_nodes.append({"path_energy" : max_path_load[i], "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
+                    Helper.mpi_print("New tail found with parent:", current_node["node_id"])
+                    new_nodes.append({"strongest_link" : max_path_load[i], "node_id" : neigh_id, "parent_id" : current_node["node_id"], "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe(), "walls": neighbors[nid].wall_list})
                 elif max_path_load[i] < energies[neigh_id] and neighbors[nid].get_pos()[1] > current_pos[1] and max_path_load[i] <= self.__min_complete_load + self.__load_margin:
                     self.__paths[neigh_id] = [(current_node["node_id"], max_path_load[i])]
                     energies[neigh_id] = max_path_load[i]
                     self.__step_energies[neigh_id] = [(loads[i], max_path_load[i])]
-                    new_nodes.append({"path_energy" : max_path_load[i], "node_id" : neigh_id, "typeset_id" : neighbors[nid].get_tid(), "parent_rank" : rank, "parent_id" : current_node["node_id"], "typeset_list" : neighbors[nid].get_typeset_list(), "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe()})
-                    Helper.print(f"Node {neigh_id} was accepted with path load of {max_path_load[i]}")
+                    new_nodes.append({"strongest_link" : max_path_load[i], "node_id" : neigh_id, "parent_id" : current_node["node_id"], "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe(), "walls": neighbors[nid].wall_list})
+                    Helper.mpi_print(f"Node {neigh_id} was accepted with path load of {max_path_load[i]}")
                 else:
-                    Helper.print(f"Node {neigh_id} was rejected with path load of {max_path_load[i]}, existing path load: {energies[neigh_id]}")
+                    Helper.mpi_print(f"Node {neigh_id} was rejected with path load of {max_path_load[i]}, existing path load: {energies[neigh_id]}")
                     discarded.append(nid)
                     neighbors[nid].discard()
 
+
             if not new_nodes:
                 new_nodes = [-1]
+
+            current.take_walls_down()
 
             return new_nodes, discarded
 
@@ -492,19 +480,6 @@ class FracGraph:
         Helper.action(os.mkdir, save_dir)
         comm.Barrier()
 
-        #Sanity check
-#        self.__sanity_list = np.array(self.__sanity_list)
-#        check_against = self.__sanity_list*size
-#        all_lists = np.empty_like(check_against)
-#        comm.Allreduce(self.__sanity_list, all_lists, op = MPI.SUM)
-#        sane = np.allclose(all_lists, check_against)
-#        if not sane:
-#            raise RuntimeError("Different coordinates associated with the same node on different processes")
-#        else:
-#            Helper.mpi_print("All node positions are equivalent")
-
-            
-
         self.__outp_freq = outp_freq
         self.__save_dir = save_dir
         self.__head.activate(box = self.get_box())
@@ -513,119 +488,31 @@ class FracGraph:
         self.__tail_versions = list()
 
         scan_ctr = -1
+        energies = {node_id : float("inf") for node_id in range(self.__node_ctr)}
+        head = self.__head
+        energies[head.get_id()] = 0
+        head_data = {"strongest_link" : 0, "node_id" : head.get_id(), "parent_id" : -1, "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe(), "walls": head.wall_list}
+        priority_queue = [self.__node_info_transform(head_data)]
+        while priority_queue:
+            sent_nodes = list()
+            own_node = self.__node_info_transform(heapq.heappop(priority_queue))
+            heap_ctr = 1
+
+            scan_ctr += 1
+            to_add, discarded = dijkstra_step(energies, own_node, scan_ctr)
+
+            if not isinstance(to_add, list):
+                self.__tail_versions.append(to_add)
+                if to_add["load"] < self.__min_complete_load:
+                    self.__min_complete_load = to_add["load"]
+                to_add = list()
+            elif to_add == [-1]:
+                to_add = list()
+
+            for node in to_add:
+                heapq.heappush(priority_queue, self.__node_info_transform(node))
+
         if rank == 0:
-            energies = {node_id : float("inf") for node_id in range(self.__node_ctr)}
-            head = self.__head
-            energies[head.get_id()] = 0
-            head_data = {"path_energy" : 0, "node_id" : head.get_id(), "typeset_id" : head.get_tid(), "parent_rank" : None, "parent_id" : None, "typeset_list" : list(), "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe()}
-            priority_queue = [self.__node_info_transform(head_data)]
-            terminal_nodes = list()
-            terminal_scan = False
-            while priority_queue:
-                #Helper.print("Node Heap:", [self.__id_node_map[node[1]] for node in priority_queue])
-                sent_nodes = list()
-                own_node = self.__node_info_transform(heapq.heappop(priority_queue))
-                heap_ctr = 1
-                heap_size = len(priority_queue)
-                while heap_ctr < heap_size and heap_ctr < size:
-                    current_node = self.__node_info_transform(heapq.heappop(priority_queue))
-                    comm.send(pickle.dumps(energies), dest = heap_ctr, tag = 0)
-                    comm.send(pickle.dumps(current_node), dest = heap_ctr, tag = 1)
-                    heap_ctr += 1
-                    sent_nodes.append(current_node)
-
-                scan_ctr += 1
-                to_add, discarded = dijkstra_step(energies, own_node, scan_ctr)
-
-                if not isinstance(to_add, list):
-                    self.__tail_versions.append(to_add)
-                    if to_add["load"] < self.__min_complete_load:
-                        self.__min_complete_load = to_add["load"]
-                    to_add = list()
-                elif to_add == [-1]:
-                    if not terminal_scan:
-                        terminal_nodes.append(own_node)
-                    to_add = list()
-
-
-                for i in range(1, heap_ctr):
-                    Helper.print(f"Waiting for response from rank {i}")
-                    answer = pickle.loads(comm.recv(source = i, tag = 2))
-                    node_disc = pickle.loads(comm.recv(source = i, tag = 3))
-                    min_complete_load = comm.recv(source = i, tag = 4)
-                    if min_complete_load < self.__min_complete_load:
-                        self.__min_complete_load = min_complete_load
-                    for disc_id in node_disc:
-                        self.__id_node_map[disc_id].discard()
-                    if isinstance(answer, list):
-                        if answer == [-1] and not terminal_scan:
-                            terminal_nodes.append(sent_nodes[i - 1])
-                        else:
-                            for node_info in answer:
-                                #Check that the path energy passed from a different processer is lower than the existing one for the newly calulated node.
-                                if node_info["path_energy"] < energies[node_info["node_id"]]:
-                                    energies[node_info["node_id"]] = node_info["path_energy"]
-                                    to_add.append(node_info)
-                    else:
-                        self.__tail_versions.append(answer)
-                        if answer["load"] < self.__min_complete_load:
-                            self.__min_complete_load = answer["load"]
-
-                for i in range(1, heap_ctr):
-                    comm.send(self.__min_complete_load, dest = i, tag = 5)
-
-
-                for node in to_add:
-                    heapq.heappush(priority_queue, self.__node_info_transform(node))
-
-                #Give a second chance to the nodes without any fit neighbors
-                """
-                if terminal_nodes and not priority_queue:
-                    terminal_scan = True
-                    while terminal_nodes:
-                        node = terminal_nodes.pop()
-                        found_neighs = self.__extend_neighbors(self.__id_node_map[node["node_id"]])
-                        if found_neighs:
-                            heapq.heappush(priority_queue, self.__node_info_transform(node))
-                """
-
-
-            for i in range(1, size):
-                comm.send(None, dest = i, tag = 0)
-
-
-        else:
-            done = False
-            to_add = list()
-            while not done:
-                energies = comm.recv(source = 0, tag = 0)
-                if not energies:
-                    done = True
-                else:
-                    energies = pickle.loads(energies)
-                    current_node = pickle.loads(comm.recv(source = 0, tag = 1))
-                    scan_ctr += 1
-                    to_add, discarded = dijkstra_step(energies, current_node, scan_ctr)
-                    Helper.print(f"Rank {rank} sent result to head rank")
-                    comm.send(pickle.dumps(to_add), dest = 0, tag = 2)
-                    comm.send(pickle.dumps(discarded), dest = 0, tag = 3)
-                    comm.send(self.__min_complete_load, dest = 0, tag = 4)
-                    self.__min_complete_load = comm.recv(source = 0, tag = 5)
-
-
-        comm.Barrier()
-        if rank == 0:
-            for i in range(1, size):
-                paths = comm.recv(source = i, tag = 0)
-                steps = comm.recv(source = i, tag = 1)
-                for node, parent_list in paths.items():
-                    for parent_pair in parent_list:
-                        if not node in self.__paths or parent_pair[-1] < self.__paths[node][-1]:
-                            self.__paths[node] = parent_pair
-                for node, eng_list in steps.items():
-                    for eng_pair in eng_list:
-                        if not node in self.__step_energies or eng_pair[-1] < self.__step_energies[node][-1]:
-                            self.__step_energies[node] = eng_pair
             for key, value in self.__paths.items():
                 if key == self.__tail.get_id():
                     appropriate_paths = list()
@@ -647,25 +534,29 @@ class FracGraph:
 
 
             got_one = False
-            Helper.print("Path load factor window:", self.__min_complete_load , self.__min_complete_load + self.__load_margin)
+
+            out_file = open("energy_relese_distribution.csv", "w")
+            out_file.write("Stress Factor, G, dE, dA\n")
+
+            Helper.mpi_print("Path load factor window:", self.__min_complete_load , self.__min_complete_load + self.__load_margin)
             for tail in self.__tail_versions:
                 if tail["load"] >= self.__min_complete_load and tail["load"] <= self.__min_complete_load + self.__load_margin:
                     got_one = True
-                    Helper.print("Energy diff:", tail["pe"] - self.__head.get_pe())
-                    Helper.print("G:", 0.69*(tail["pe"] - self.__head.get_pe())/tail["area"])
+                    G = 0.69*(tail["pe"] - self.__head.get_pe())/tail["area"]
+                    E = tail["pe"] - self.__head.get_pe()
+                    Helper.print("Energy diff:", E)
+                    Helper.print("G:", G)
                     Helper.print("Load factor:", tail["load"])
+                    out_file.write(f"{tail['load']}, {G}, {E}, {tail['area']}\n")
 
                 else:
                     Helper.print("removing datafile with ctr:", ctr)
                     os.remove(f"final_paths/{tail['ctr']}.struct")
 
+            out_file.close()
             if not got_one:
                 raise RuntimeError("No path from head node to tail node was found.")
                     
-
-        else:
-            comm.send(self.__paths, dest = 0, tag = 0)
-            comm.send(self.__step_energies, dest = 0, tag = 1)
 
 
 
@@ -710,8 +601,6 @@ class FracGraph:
             new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr, units = self.__units)
             self.__id_node_map.append(new_node)
             self.__node_hash[disc_coords] = new_node
-            #self.__sanity_list.append(disc_coords[0])
-            #self.__sanity_list.append(disc_coords[1])
             Helper.mpi_print("Created a new node", self.__node_ctr, "at pos:", disc_coords)
             self.__node_ctr += 1
 
@@ -731,94 +620,11 @@ class FracGraph:
 
         return new_node
 
-    def __modify_struct(self):
-        groups = Data.type_groups
-        ntypes = Data.initial_types
-        prev_name = self.__head.structure_file
-        name = os.getcwd() + "/" + re.sub(r"(?<=.+)\.(?=[^\.]+$)", "_new.", prev_name.split("/")[-1])
-        #name = re.sub(r"(?<=\/[^/]+)\.(?=.+$)", "_new.", prev_name)
-        if not os.path.isfile(name):
-            text = open(prev_name, 'r').read()
-            text = re.sub(r"(?<=\s*)\d+(?=\s+atom types)", str(ntypes*groups), text)
-            for t in range(1, ntypes + 1):
-                for g in range(groups - 1):
-                    mass_re = re.compile(fr"^{ntypes*g + t}\s+\d+\.\d+$", re.MULTILINE)
-                    mass_line = mass_re.findall(text)[-1]
-                    text = mass_re.sub(mass_line + "\n" + re.sub(r"^\d+(?=\s+)", str(t + ntypes*(g + 1)), mass_line), text)
-                    
-            open(name, "w").write(text)
-        self.__head.structure_file = name
-
         
-    def __modify_potfile(self, interactions):
-        groups = Data.type_groups
-        ntypes = Data.initial_types
-        if interactions == "default":
-            interactions = []
-            for g in range(2, groups + 1):
-                interactions.append((1, g))
-                interactions.append((g, 1))
-        else:
-            for i in range(len(interactions)):
-                interactions.append(interactions[i][::-1])
-            
-        name = os.getcwd() + "/" + re.sub(r"(?<=.+)\.(?=[^\.]+$)", "_new.", self.__head.potfile.split("/")[-1])
-        if not os.path.isfile(name):
-            text = open(self.__head.potfile, 'r').read()
-            new_potfile = open(name, 'w')
-
-            #Check for hybrid potentials
-            pair_style_re = re.compile(r"^pair_style\s+hybrid", re.MULTILINE)
-            hybrid_handle = ""
-            if pair_style_re.findall(text):
-                hybrid_handle = "table"
-
-            new_text = text + "\n\n#-------------------------\n\n"
-            new_text += f"variable      nono_table_path string \"{self.__nono_table}\""
-            #t is type of atom
-            for t in range(1, ntypes + 1):
-                #print("Looking at type:", t)
-                #g is group of types
-                for g in range(groups - 1):
-                    #print("In group:", g)
-                    mass_re = re.compile(f"^mass\s+{ntypes*g + t}\s+.+$", re.MULTILINE)
-                    mass_line = mass_re.findall(new_text)[-1]
-                    new_text = mass_re.sub(mass_line + '\n' + re.sub(f"(?<=^mass\s+){ntypes*g + t}(?=\s+.+$)", str(ntypes*(g + 1) + t), mass_line) + '\n', new_text)
-
-
-                    #j is atom type greater than t (current type) used for pair combinations
-                    for j in range(t, ntypes + 1):
-                        #print("Paired with type:", j)
-                        #print(f"^pair_coeff\s+{t}\s+{j}\s+.+$")
-                        coeff_line = re.compile(f"^pair_coeff\s+{t}\s+{j}\s+.+$", re.MULTILINE).findall(new_text)[-1]
-                        #Add a pair_coeff line within current group
-                        new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(g + 1) + t} {ntypes*(g + 1) + j}", coeff_line) + f"\t#Groups ({g + 2}, {g + 2}) for types ({t}, {j})"
-
-                        #Cycle through inra group interactions
-                        for group_iter in range(g + 2, groups + 1):
-                            if (g + 1, group_iter) in interactions:
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
-                                if t != j:
-                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
-                            else:
-                                tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*g + t} {ntypes*(group_iter - 1) + j}", coeff_line)
-                                new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*g + t}\s+{ntypes*(group_iter - 1) + j}).+", "\t" + hybrid_handle + "\t${nono_table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({g + 1}, {group_iter}) for types ({t}, {j})"
-                                if t != j:
-                                    tmp_line = re.sub(f"(?<=^pair_coeff\s+){t}\s+{j}(?=\s+.+$)", f"{ntypes*(group_iter - 1) + t} {ntypes*g + j}", coeff_line)
-                                    new_text += '\n' + re.sub(f"(?<=^pair_coeff\s+{ntypes*(group_iter - 1) + t}\s+{ntypes*g + j}).+", "\t" + hybrid_handle + "\t${nono_table_path}\tNoNo\t10", tmp_line) + f"\t#Groups ({group_iter}, {g + 1}) for types ({t}, {j})"
-                    
-            general_type_re = re.compile(f"(?<=pair_coeff\s+\*\s+\*.+)(\s+\S+){{{ntypes}}}$", re.MULTILINE)
-            if(general_type_re.search(new_text)):
-                    type_names = general_type_re.search(new_text).group()*groups
-                    new_text = general_type_re.sub(type_names, new_text)
-            new_potfile.write(new_text)
-
-        self.__head.potfile = name
-
         
 
 class Node:
-    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False, timestep = 1):
+    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False, timestep = 1, minimize = False):
         self.__id = node_ctr
         self.__active = False
         self.__is_head = is_head
@@ -828,10 +634,14 @@ class Node:
         self.__surface_area = 0
         self.__test_mode = test_mode
         self.__old_tip = None
+        self.minimize = minimize
         self.__discarded = False
+        self.wall_list = list()
+        self.current_wall_count = 0
 
         if self.__is_head:
             self.__units = units
+            self.current_wall_count = 0
             if test_mode:
                 if os.path.isdir("logs"):
                     Helper.action(os.system, "rm -r logs")
@@ -854,8 +664,10 @@ class Node:
                 self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
             self.__lmp.command(f"read_data {filename}")
             self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}/../")
-            self.type_holder = Holder(self.__lmp)
             self.__theta = np.pi/2
+        else:
+            self.atom_positions = None
+
             
 
     #Setters
@@ -885,8 +697,6 @@ class Node:
 
     def set_parent(self, node):
         if node:
-            if node.type_holder.get_ntype_sets():
-                node.type_holder.change_typeset(node.__typeset_id)
             node_pos = node.get_pos()
             if not (self.__tip[0] - node_pos[0]):
                 if self.__tip[1] > node_pos[1]:
@@ -899,6 +709,13 @@ class Node:
                     self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x)
                 else:
                     self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x) + np.pi
+
+
+            self.__lmp = node.get_lmp()
+            self.__prev_theta = node.get_theta()
+            self.wall_list = node.wall_list.copy()
+            self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*node.atom_positions))
+            self.minimize = node.minimize
 
 
             if self.is_tail():
@@ -914,14 +731,19 @@ class Node:
         self.__parent = node
 
     #Getters
+    def get_atom_positions(self):
+        if self.atom_positions is not None:
+            return self.atom_positions
+        else:
+            return np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double)
+
+
     def get_parent_angle(self):
         if self.__parent:
             return self.__parent.__theta
         else:
             return np.pi/2
 
-    def get_tid(self):
-        return self.__typeset_id
 
     def get_pe(self):
         return self.__pe
@@ -945,7 +767,7 @@ class Node:
         return self.__surface_area
 
     def get_neighbors(self):
-        return list(self.__neighbors)
+        return sorted(list(self.__neighbors), key = lambda x: x.__id)
 
     def get_pos(self):
         return self.__tip
@@ -959,8 +781,6 @@ class Node:
     def get_lmp(self):
         return self.__lmp
 
-    def get_typeset_list(self):
-        return self.type_holder.get_typeset_list()
 
     def get_cut_length(self):
         return self.__cut_length
@@ -977,13 +797,6 @@ class Node:
 
     def is_active(self):
         return self.__active
-
-    def path_back(self):
-        if self.__theta + np.pi ==  self.__prev_theta:
-            return True
-        if self.__theta - np.pi == self.__prev_theta:
-            return True
-        return False
 
     #Built-in reassignment
     def __str__(self):
@@ -1002,22 +815,24 @@ class Node:
         self.__lmp.command("atom_style charge")
         self.__lmp.command("boundary p p p")
         self.__lmp.command("comm_modify mode single vel yes")
-        self.__lmp.command("neighbor 2.0 bin")
+        self.__lmp.command("neighbor 0.0 bin")
         self.__lmp.command("neigh_modify every 1 delay 0")
 
-    def reset_lowest(self, typeset_id, parent_rank, typeset_list, surface_area, theta, head, pe):
-        self.type_holder = head.type_holder
+    def reset_lowest(self, surface_area, theta, head, pe, walls):
         self.__lmp = head.__lmp
         self.__pe = pe
+        self.current_wall_count = 0
         if not self.is_head():
             self.__surface_area = surface_area
             self.__theta = theta
-            if parent_rank == rank:
-                self.__typeset_id = typeset_id
-                self.type_holder.change_typeset(self.__typeset_id)
-            else:
-                self.__typeset_id = self.type_holder.add_typeset(typeset_list)
+            self.atom_positions = np.copy(head.atom_positions)
+            self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.atom_positions))
+            self.place_walls(walls)
 
+    def take_walls_down(self):
+        for i in range(self.current_wall_count):
+            self.__lmp.command(f"region slab_{i} delete")
+            self.__lmp.command(f"unfix wall_{i}")
 
     def activate(self, box, parent = None):
         if self.__is_head:
@@ -1027,14 +842,10 @@ class Node:
                 self.__lmp.command(f"atom_modify map yes")
                 self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
-                self.__typeset_id = 0
                 Helper.mpi_print("Head node activated")
+                self.atom_positions = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double)
         else:
             self.set_parent(parent)
-
-            self.__lmp = self.__parent.get_lmp()
-            self.type_holder = self.__parent.type_holder
-            self.__prev_theta = self.get_parent_angle()
 
             par_pos = self.__parent.get_pos()
             y_dist = self.__tip[1] - par_pos[1]
@@ -1046,21 +857,16 @@ class Node:
                 y_dist = Data.old_bounds[1] - par_pos[1]
                 x__dist = 0
 
+            z_dim = box[1][2] - box[0][2]
             self.__cut_length = np.sqrt(x_dist**2 + y_dist**2)
-            self.__surface_area = self.__parent.get_surface_area() + self.__cut_length*(box[1][2] - box[0][2])
+            self.__surface_area = self.__parent.get_surface_area() + self.__cut_length*z_dim
 
-            my_atoms = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
-            types = np.array(self.__lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
-            self.box_side = box[1][0] - box[0][0]
+            self.wall_list.append({"center": f"{self.__tip[0] - x_dist/2} {self.__tip[1] - y_dist/2} {(box[1][2] + box[0][2])/2}", "side1": f"{x_dist} {y_dist} 0", "side2": f"0 0 {z_dim}"})
+            self.current_wall_count = self.__parent.current_wall_count + 1
+            Helper.mpi_print(f"Node {self.__id} wall {self.current_wall_count} {self.wall_list[-1]}")
+            self.add_wall(wall = self.wall_list[-1])
 
-            old_tid = self.type_holder.get_current()
 
-            new_types = self.__new_types(my_atoms, types, self.__lmp.get_natoms())
-            self.__typeset_id = self.type_holder.add_typeset(new_types, )
-            self.type_holder.change_typeset(self.__typeset_id)
-
-            #self.__lmp.command("minimize 1.0e-8 1.0e-8 100000 10000000")
-            
 
             try:
                 grandparent = self.__parent.get_parent()
@@ -1069,307 +875,42 @@ class Node:
                 pass
 
 
-
         self.__lmp.command("run 0")
+        my_prerelax = self.__lmp.get_thermo("pe") 
+        if self.minimize:
+            self.__lmp.command("minimize 1.0e-8 1.0e-8 100000 10000000")
         self.__active = True
         self.__pe = self.__lmp.get_thermo("pe")
 
         if self.__is_head:
             self.__load = 0
             self.__G = 0
-            old_tid = 0
         else:
             a = self.__cut_length
-            G = 0.69*(self.__pe - self.__parent.get_pe())/self.__surface_area
+            G = 0.69*(my_prerelax - self.__parent.get_pe())/self.__surface_area
             if G < 0:
+                Helper.mpi_print("BELOW ZERO")
                 G = 0
-            #normal_stress = np.sqrt(G*E*(a + R)/((1-nu**2)*np.pi*a**2))
             normal_stress = np.sqrt(G/(a*(np.cos(np.pi/2 - self.__theta))**2))
             self.__load = normal_stress
             self.__G = G
 
-        Helper.print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Type set id: {self.__typeset_id}, Old TID: {old_tid}, Rank: {rank}, Step G: {self.__G}, Load: {self.__load}, PotEng: {self.__pe}")
+            self.__lmp.command(f"region slab_{self.current_wall_count} delete")
+            self.__lmp.command(f"unfix wall_{self.current_wall_count}")
+            self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.__parent.atom_positions))
+
+        Helper.mpi_print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Rank: {rank}, Step G: {self.__G}, Load: {self.__load}, PotEng: {self.__pe}")
         return self.__load
 
 
+    def place_walls(self, wall_list):
+        for i, wall in enumerate(wall_list):
+            self.add_wall(wall_num = i, wall = wall)
+            self.current_wall_count += 1
 
-    def __new_types(self, my_atoms, types, natoms):
-        prev_node = self.__parent.get_pos()
-        new_types_lst = list()
-        for i in range(natoms):
-            float_pos = my_atoms[i]
-            group = self.__near_surface(float_pos[:-1], prev_node = prev_node)
-            if types[i] <= Data.initial_types:
-                if group <= Data.type_groups:
-                    new_type = types[i] + (group - 1)*Data.initial_types
-                else:
-                    new_type = types[i]
-            elif types[i] > Data.initial_types and types[i] <= 3*Data.initial_types:
-                if self.__theta > self.__prev_theta + np.pi/2 and group == 3 or self.__theta < self.__prev_theta -np.pi/2 and group == 2:
-                    tp = types[i]%Data.initial_types
-                    tp = tp if tp else tp + Data.initial_types
-                    new_type = tp + (group - 1)*Data.initial_types
-                else:
-                    new_type = types[i]
-            else:
-                if group <= Data.type_groups:
-                    tp = types[i]%Data.initial_types
-                    tp = tp if tp else tp + Data.initial_types
-                    new_type = tp + (group - 1)*Data.initial_types
-                else:
-                    new_type = types[i]
+    def add_wall(self, wall, wall_num = None):
+        if wall_num is None:
+            wall_num = self.current_wall_count
 
-            new_types_lst.append(new_type)
-        return new_types_lst
-
-
-
-    def __near_surface(self, atom_pos, prev_node):
-        cutoff = Data.non_inter_cutoff
-        x0, y0 = self.__tip #Tip of the division vector
-
-        #Tail of the division vector
-        x1, y1 = prev_node
-
-        #Tail of the parallel transport of the division vector to the left by length 'cutoff'
-        x2 = x1 - cutoff*np.sin(self.__theta)
-        y2 = y1 + cutoff*np.cos(self.__theta)
-
-        #Tail of the parallel transport of the division vector to the right by length 'cutoff'
-        x3 = x1 + cutoff*np.sin(self.__theta)
-        y3 = y1 - cutoff*np.cos(self.__theta)
-
-        #Line through point (x0, y0) at angle theta
-        f01 = np.poly1d([np.tan(self.__theta), y0 - x0*np.tan(self.__theta)])
-
-        #Line through point (x0, y0) perpendicular to theta
-        f02 = np.poly1d([np.tan(self.__theta + np.pi/2), y0 - x0*np.tan(self.__theta + np.pi/2)])
-
-        #Line through point (x2, y2) at angle theta
-        f21 = np.poly1d([np.tan(self.__theta), y2 - x2*np.tan(self.__theta)])
-
-        #Line through point (x1, y1) perpendicular to theta
-        f12 = np.poly1d([np.tan(self.__theta + np.pi/2), y1 - x1*np.tan(self.__theta + np.pi/2)])
-
-        #Line through point (x3, y3) at angle self.__theta
-        f31 = np.poly1d([np.tan(self.__theta), y3 - x3*np.tan(self.__theta)])
-
-        #Line through point (x1, y1) at angle perpendicular to prev_theta
-        f99 = np.poly1d([np.tan(self.__prev_theta + np.pi/2), y1 - x1*np.tan(self.__prev_theta + np.pi/2)])
-
-        for x in [atom_pos[0], self.box_side + atom_pos[0], atom_pos[0] - self.box_side]:
-        #for x in [atom_pos[0]]:
-
-            # -90
-            if self.__theta == -np.pi/2:
-                if (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x > x1 and x <= x2):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x <= x1 and x >= x3):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x >= x1):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x < x1):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-            # (-90, 0)
-            elif self.__theta > -np.pi/2 and self.__theta < 0:
-                if (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] <= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f01, x)):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f21, x)):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f31, x)):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-            # 0
-            elif self.__theta == 0:
-                if (atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f01, x) and x >= x1 and x <= x0):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f31, x) and x >= x1 and x <= x0):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and x >= x0):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and x >= x0):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-            # (0, 90)
-            elif self.__theta > 0 and self.__theta < np.pi/2:
-                if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f01, x)):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] >= np.polyval(f31, x)):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-
-            # 90
-            elif self.__theta == np.pi/2:
-                if (atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f02, x) and x <= x1 and x > x2):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f02, x) and x > x1 and x < x3):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f02, x) and x <= x0):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f02, x) and x >= x0):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-
-            # (90, 180)
-            elif self.__theta > np.pi/2 and self.__theta < np.pi:
-                if (atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f01, x)):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x) and atom_pos[1] >= np.polyval(f12, x) and atom_pos[1] <= np.polyval(f31, x)):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x)):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-            # 180
-            elif self.__theta == np.pi:
-                if (atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] <= np.polyval(f01, x) and x <= x1 and x >= x0):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f31, x) and x <= x1 and x >= x0):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and x <= x0):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and x <= x0):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-            # (180, 270)
-            elif self.__theta > np.pi and self.__theta < 3*np.pi/2:
-                if (atom_pos[1] >= np.polyval(f21, x) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x)):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] <= np.polyval(f31, x) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x)):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x)):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] >= np.polyval(f01, x) and atom_pos[1] <= np.polyval(f02, x)):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-            # 270
-            elif self.__theta == 3*np.pi/2:
-                if (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x < x1 and x >= x3):
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-                elif (atom_pos[1] >= np.polyval(f02, x) and atom_pos[1] <= np.polyval(f12, x) and x > x1 and x <= x2):
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x >= x1):
-                    res = 4
-                    if res <= Data.type_groups:
-                        return res
-                elif ((np.sqrt((x - x0)**2 + (atom_pos[1] - y0)**2) <= cutoff) and atom_pos[1] <= np.polyval(f02, x) and x < x1):
-                    res = 5
-                    if res <= Data.type_groups:
-                        return res
-
-            #Calculating angle between the atom and x-axis
-            if not x - x1:
-                if atom_pos[1] > y1:
-                    phi = np.pi/2
-                elif atom_pos[1] < y1:
-                    phi = -np.pi/2
-                else:
-                    phi = -self.__prev_theta
-            else:
-                phi = np.arctan((atom_pos[1] - y1)/(x - x1))
-
-            if x < x1:
-                phi += np.pi
-
-            ahead_prev = False
-            behind_curr = False
-            angle_diff = phi - self.__prev_theta
-            if angle_diff > np.pi:
-                angle_diff = 2*np.pi - angle_diff
-            elif angle_diff < -np.pi:
-                angle_diff = 2*np.pi + angle_diff
-            if angle_diff >= -np.pi/2 and angle_diff <= np.pi/2:
-                ahead_prev = True
-            angle_diff = np.pi - phi + self.__theta
-            if angle_diff > np.pi:
-                angle_diff = 2*np.pi - angle_diff
-            elif angle_diff < -np.pi:
-                angle_diff = 2*np.pi + angle_diff
-            if angle_diff >= -np.pi/2 and angle_diff <= np.pi/2:
-                behind_curr = True
-
-
-            if ahead_prev and behind_curr and (np.sqrt((x - x1)**2 + (atom_pos[1] - y1)**2) < cutoff) and (self.__theta - self.__prev_theta != np.pi) and (self.__prev_theta - self.__theta != np.pi):
-                if self.__theta > self.__prev_theta and self.__theta < self.__prev_theta + np.pi or self.__theta < self.__prev_theta - np.pi:
-                    res = 3
-                    if res <= Data.type_groups:
-                        return res
-                if self.__theta < self.__prev_theta and self.__theta > self.__prev_theta - np.pi or self.__theta > self.__prev_theta + np.pi:
-                    res = 2
-                    if res <= Data.type_groups:
-                        return res
-
-
-
-
-        res = 1
-        if res <= Data.type_groups:
-            return res
+        self.__lmp.command(f"region slab_{wall_num} slab center {wall['center']} side1 {wall['side1']} side2 {wall['side2']}")
+        self.__lmp.command(f"fix wall_{wall_num} all wall/ghost/region slab_{wall_num} -1")

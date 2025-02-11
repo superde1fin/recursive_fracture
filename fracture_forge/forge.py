@@ -162,7 +162,7 @@ def color_paths(graph, paths = None):
 
             node = (path[-1][0], box[0][1])
             line_length += np.sqrt((prev_node[0] - node[0])**2 + (prev_node[1] - node[1])**2)
-            print("Line length:", line_length)
+            #print("Line length:", line_length)
     if not found_at_least_one_full:
         raise RuntimeError("Error: No full path was found, something went wrong")
 
@@ -229,6 +229,7 @@ def parser_call():
     parser.add_argument("-pr", "--pressure", default = False, help = "Calculate surface energy using pressure difference.", action = "store_true")
     parser.add_argument("-rd", "--random", default = 0, help = "Specifies the number of random paths throug a material to run. If this option is specified no path search will be performed.", metavar = "", type = int)
     parser.add_argument("-nt", "--no_interaction_table", default = SystemParams.nono_table, help = "Path to the no interactions table. Has to include one entry labeled as NoNo with zeros throughout.", metavar = "", type = str)
+    parser.add_argument("-m", "--minimize", action = "store_true", help = "When specified lammps minimization is performed after each cut.")
     args = parser.parse_args()
 
     
@@ -266,13 +267,13 @@ def main():
     if args.pressure:
         Data.use_pressure = True
 
-    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius, nono_table = args.no_interaction_table, load_margin = args.load_margin, units = args.units)
+    graph = FracGraph(error = args.error, start_buffer = args.radius/2, test_mode = False, simulation_temp = args.temperature, connection_radius = args.radius, nono_table = args.no_interaction_table, load_margin = args.load_margin, units = args.units, minimize = args.minimize)
     if not os.path.isfile("path_save.csv"):
         if args.arbitrary_grid:
             graph.build_arbitrary(interactions = args.interactions)
         else:
             graph.build(pivot_atom_type = args.pivot_type, num_neighs = args.neighbors, interactions = args.interactions)
-        #graph.build_test(interactions = args.interactions)
+            #graph.build_test(interactions = args.interactions)
         Helper.mpi_print("Number of nodes created:", len(graph))
 
 
@@ -322,7 +323,7 @@ def main():
                 plt.savefig("random_paths.png")
 
             
-    if not args.random:
+    if not args.random and rank == 0:
         visualize(graph, paths)
 
 

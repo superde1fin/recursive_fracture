@@ -8,15 +8,18 @@ class Data:
                 }
     non_inter_cutoff = 10
     use_pressure = False
+    boltzman = 0.00198716 #kcal/mol*kelvin
 
 class SystemParams:
+    load_margin = 0
     simulation_temp = 300
-    dr = 3
+    dr = 1
     error = 0.1
     interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
-    dtheta = 30
     pivot_type = 2
     neigh_num = 2
+    nono_table = "NoNo.table"
+    default_units = "real"
 
 class Helper:
     action_proc = 0

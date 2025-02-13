@@ -387,130 +387,37 @@ class FracGraph:
 
 
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
-        def dijkstra_step(energies, current_node, scan_ctr):
-            box_x_side = self.__box[1][0] - self.__box[0][0]
+        node = self.__head
+        box = self.get_box()
 
-            current = self.__id_node_map[current_node["node_id"]]
-
-            current_pos = current.get_pos()
-
-            if current_node["strongest_link"] > energies[current_node["node_id"]]:
-                print(f"Attempted node {current_node['node_id']} with load:", current_node["strongest_link"], "Existing max path load:", energies[current_node["node_id"]])
-                return list(), [current_node["node_id"]]
-
-            Helper.mpi_print("-----------------------------------------------------")
-            Helper.mpi_print("Lowest node:", current_node["node_id"], "Path Load:", current_node["strongest_link"], "Parent:", current_node["parent_id"], "Pos:", current_pos)
-            current.reset_lowest(current_node["surface_area"], current_node["theta"], self.__head, current_node["pe"], current_node["walls"])
-
-
-            current.get_lmp().command(f"write_data {save_dir}/out.{scan_ctr}.struct")
-
-
-            if current.is_tail():
-                self.__tail.reset_tip()
-                self.__head.reset_tip()
-                paths_available = os.listdir("final_paths")
-                if paths_available:
-                    ctr = max([int(struct.split('.')[0]) for struct in paths_available]) + 1
-                else:
-                    ctr = 0
-
-                Helper.mpi_print("writing tail datafile with ctr:", ctr)
-                current.get_lmp().command(f"write_data final_paths/{ctr}.struct")
-                current.take_walls_down()
-                return {"load": current_node["strongest_link"], "pe" : current_node["pe"], "area": current_node["surface_area"], "ctr": ctr}, list()
-
-            new_nodes = list()
-            discarded = list()
-            node_ids = list()
-            min_stress = float("inf")
-            max_path_load = list()
+        parent = None
+        while not node.is_tail():
+            node.activate(box = box, parent = parent)
+            current_pos = node.get_pos()
             neighbors = current.get_neighbors()
-            box = self.get_box()
-            loads = list()
-            for i, neighbor in enumerate(neighbors):
-                neigh_id = neighbor.get_id()
-                if not neighbor.is_head() and neigh_id != current_node["parent_id"] and neighbor.get_pos()[1] > current_pos[1]:
-                    normal_stress = neighbor.activate(box = box, parent = current)
-                    if normal_stress < min_stress:
-                        min_stress = normal_stress
-                    if normal_stress > current_node["strongest_link"]:
-                        max_path_load.append(normal_stress)
-                    else:
-                        max_path_load.append(current_node["strongest_link"])
+            selected_neighs = list()
+            Z = 0
+            num_accepted = 0
+            for neigh in neighbors:
+                if neigh.get_pos()[1] > current_pos[1]:
+                    weight = neigh.activate(box = box, parent = node)
+                    selected_neighs.append((weight, neigh))
+                    Z += non_normalized_prob
+                    num_accepted += 1
 
-                    loads.append(normal_stress)
-                    node_ids.append(i)
-
-            Helper.mpi_print(f"Current minimum completed path load {self.__min_complete_load}")
-
-            for i, nid in enumerate(node_ids):
-                neigh_id = neighbors[nid].get_id()
-                neigh_coords = neighbors[nid].get_pos()
-                if neighbors[nid].is_tail() and (neigh_id in self.__paths) and max_path_load[i] <= self.__min_complete_load + self.__load_margin:
-                    self.__paths[neigh_id].append((current_node["node_id"], max_path_load[i]))
-                    self.__step_energies[neigh_id].append((loads[i], max_path_load[i]))
-                    Helper.mpi_print("New tail found with parent:", current_node["node_id"])
-                    new_nodes.append({"strongest_link" : max_path_load[i], "node_id" : neigh_id, "parent_id" : current_node["node_id"], "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe(), "walls": neighbors[nid].wall_list})
-                elif max_path_load[i] < energies[neigh_id] and neighbors[nid].get_pos()[1] > current_pos[1] and max_path_load[i] <= self.__min_complete_load + self.__load_margin:
-                    self.__paths[neigh_id] = [(current_node["node_id"], max_path_load[i])]
-                    energies[neigh_id] = max_path_load[i]
-                    self.__step_energies[neigh_id] = [(loads[i], max_path_load[i])]
-                    new_nodes.append({"strongest_link" : max_path_load[i], "node_id" : neigh_id, "parent_id" : current_node["node_id"], "surface_area" : neighbors[nid].get_surface_area(), "theta" : neighbors[nid].get_theta(), "pe" : neighbors[nid].get_pe(), "walls": neighbors[nid].wall_list})
-                    Helper.mpi_print(f"Node {neigh_id} was accepted with path load of {max_path_load[i]}")
+            cumul_prob = 0
+            rand_selector = random.random()
+            i = 0
+            found_next = False
+            while i < num_accepted and not found_next:
+                p = selected_neighs[i][0]/Z
+                if (rand_selector > cumul_prob) and (rand_selector <= cumul_prob + p):
+                    node = selected_neighs[i][1]
                 else:
-                    Helper.mpi_print(f"Node {neigh_id} was rejected with path load of {max_path_load[i]}, existing path load: {energies[neigh_id]}")
-                    discarded.append(nid)
-                    neighbors[nid].discard()
+                    cumul_prob += p
 
+                i += 1
 
-            if not new_nodes:
-                new_nodes = [-1]
-
-            current.take_walls_down()
-
-            return new_nodes, discarded
-
-        if os.path.isdir("final_paths"):
-            Helper.action(os.system, "rm -r final_paths")
-        Helper.action(os.mkdir, "final_paths")
-
-        if os.path.isdir(save_dir):
-            Helper.action(os.system, f"rm -r {save_dir}")
-        Helper.action(os.mkdir, save_dir)
-        comm.Barrier()
-
-        self.__outp_freq = outp_freq
-        self.__save_dir = save_dir
-        self.__head.activate(box = self.get_box())
-
-        self.__min_complete_load = float("inf")
-        self.__tail_versions = list()
-
-        scan_ctr = -1
-        energies = {node_id : float("inf") for node_id in range(self.__node_ctr)}
-        head = self.__head
-        energies[head.get_id()] = 0
-        head_data = {"strongest_link" : 0, "node_id" : head.get_id(), "parent_id" : -1, "surface_area" : head.get_surface_area(), "theta" : head.get_theta(), "pe": self.__head.get_pe(), "walls": head.wall_list}
-        priority_queue = [self.__node_info_transform(head_data)]
-        while priority_queue:
-            sent_nodes = list()
-            own_node = self.__node_info_transform(heapq.heappop(priority_queue))
-            heap_ctr = 1
-
-            scan_ctr += 1
-            to_add, discarded = dijkstra_step(energies, own_node, scan_ctr)
-
-            if not isinstance(to_add, list):
-                self.__tail_versions.append(to_add)
-                if to_add["load"] < self.__min_complete_load:
-                    self.__min_complete_load = to_add["load"]
-                to_add = list()
-            elif to_add == [-1]:
-                to_add = list()
-
-            for node in to_add:
-                heapq.heappush(priority_queue, self.__node_info_transform(node))
 
         if rank == 0:
             for key, value in self.__paths.items():
@@ -843,7 +750,6 @@ class Node:
                 self.__lmp.command(f"read_data {self.structure_file}")
                 self.__lmp.command(f"include {self.potfile}")
                 Helper.mpi_print("Head node activated")
-                self.atom_positions = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double)
         else:
             self.set_parent(parent)
 
@@ -881,6 +787,7 @@ class Node:
             self.__lmp.command("minimize 1.0e-8 1.0e-8 100000 10000000")
         self.__active = True
         self.__pe = self.__lmp.get_thermo("pe")
+        self.atom_positions = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double)
 
         if self.__is_head:
             self.__load = 0
@@ -897,7 +804,7 @@ class Node:
 
             self.__lmp.command(f"region slab_{self.current_wall_count} delete")
             self.__lmp.command(f"unfix wall_{self.current_wall_count}")
-            self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.__parent.atom_positions))
+            #self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.__parent.atom_positions))
 
         Helper.mpi_print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Rank: {rank}, Step G: {self.__G}, Load: {self.__load}, PotEng: {self.__pe}")
         return self.__load

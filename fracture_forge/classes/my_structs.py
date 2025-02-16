@@ -5,6 +5,7 @@ import numpy as np
 import ctypes as ct
 import regex as re
 from mpi4py import MPI
+import mpmath as mp
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -389,12 +390,11 @@ class FracGraph:
     def calculate(self, save_dir = "out_structs", outp_freq = 1):
         node = self.__head
         box = self.get_box()
+        node.activate(box = box)
 
-        parent = None
         while not node.is_tail():
-            node.activate(box = box, parent = parent)
             current_pos = node.get_pos()
-            neighbors = current.get_neighbors()
+            neighbors = node.get_neighbors()
             selected_neighs = list()
             Z = 0
             num_accepted = 0
@@ -402,7 +402,7 @@ class FracGraph:
                 if neigh.get_pos()[1] > current_pos[1]:
                     weight = neigh.activate(box = box, parent = node)
                     selected_neighs.append((weight, neigh))
-                    Z += non_normalized_prob
+                    Z += weight
                     num_accepted += 1
 
             cumul_prob = 0
@@ -413,6 +413,7 @@ class FracGraph:
                 p = selected_neighs[i][0]/Z
                 if (rand_selector > cumul_prob) and (rand_selector <= cumul_prob + p):
                     node = selected_neighs[i][1]
+                    found_next = True
                 else:
                     cumul_prob += p
 
@@ -420,49 +421,10 @@ class FracGraph:
 
 
         if rank == 0:
-            for key, value in self.__paths.items():
-                if key == self.__tail.get_id():
-                    appropriate_paths = list()
-                    for node_id, max_path_load in value:
-                        if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
-                            appropriate_paths.append(node_id)
-                    self.__paths[key] = appropriate_paths
-                else:
-                    self.__paths[key] = [val[0] for val in value]
-            for key, value in self.__step_energies.items():
-                if key == self.__tail.get_id():
-                    appropriate_paths = list()
-                    for step_eng, max_path_load in value:
-                        if max_path_load >= self.__min_complete_load and max_path_load >= self.__min_complete_load + self.__load_margin:
-                            appropriate_paths.append(step_eng)
-                    self.__step_energies[key] = appropriate_paths
-                else:
-                    self.__step_energies[key] = [val[0] for val in value]
-
-
-            got_one = False
-
-            out_file = open("energy_relese_distribution.csv", "w")
-            out_file.write("Stress Factor, G, dE, dA\n")
-
-            Helper.mpi_print("Path load factor window:", self.__min_complete_load , self.__min_complete_load + self.__load_margin)
-            for tail in self.__tail_versions:
-                if tail["load"] >= self.__min_complete_load and tail["load"] <= self.__min_complete_load + self.__load_margin:
-                    got_one = True
-                    G = 0.69*(tail["pe"] - self.__head.get_pe())/tail["area"]
-                    E = tail["pe"] - self.__head.get_pe()
-                    Helper.print("Energy diff:", E)
-                    Helper.print("G:", G)
-                    Helper.print("Load factor:", tail["load"])
-                    out_file.write(f"{tail['load']}, {G}, {E}, {tail['area']}\n")
-
-                else:
-                    Helper.print("removing datafile with ctr:", ctr)
-                    os.remove(f"final_paths/{tail['ctr']}.struct")
-
-            out_file.close()
-            if not got_one:
-                raise RuntimeError("No path from head node to tail node was found.")
+            E = node.get_pe() - self.__head.get_pe()
+            G = 0.69*(E)/node.get_surface_area()
+            Helper.print("Energy diff:", E)
+            Helper.print("G:", G)
                     
 
 
@@ -790,24 +752,15 @@ class Node:
         self.atom_positions = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double)
 
         if self.__is_head:
-            self.__load = 0
-            self.__G = 0
+            return 1
         else:
-            a = self.__cut_length
-            G = 0.69*(my_prerelax - self.__parent.get_pe())/self.__surface_area
-            if G < 0:
-                Helper.mpi_print("BELOW ZERO")
-                G = 0
-            normal_stress = np.sqrt(G/(a*(np.cos(np.pi/2 - self.__theta))**2))
-            self.__load = normal_stress
-            self.__G = G
+            E = my_prerelax - self.__parent.get_pe()
 
             self.__lmp.command(f"region slab_{self.current_wall_count} delete")
             self.__lmp.command(f"unfix wall_{self.current_wall_count}")
             #self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.__parent.atom_positions))
 
-        Helper.mpi_print(f"Node {self.__id} activated at x = {round(self.__tip[0], 3)}, y = {round(self.__tip[1], 3)}, Rank: {rank}, Step G: {self.__G}, Load: {self.__load}, PotEng: {self.__pe}")
-        return self.__load
+        return mp.exp(-E/(Data.boltzman*SystemParams.simulation_temp))
 
 
     def place_walls(self, wall_list):

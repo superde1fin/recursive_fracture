@@ -3,31 +3,31 @@ from mpi4py import MPI
 
 class Data:
     units_data = {
-                "real" : {"timestep" : 1e-15,}, 
-                "metal" : {"timestep" : 1e-12},
+            "real" : {"timestep" : 1e-15, "energy": 6.9e-21, "length": 1e-10}, 
+            "metal" : {"timestep" : 1e-12, "energy": 1.6e-19, "length": 1e-10},
                 }
-    non_inter_cutoff = 10
-    use_pressure = False
     boltzman = 0.00198716 #kcal/mol*kelvin
+    verbosity = 0
 
 class SystemParams:
     load_margin = 0
     simulation_temp = 300
     dr = 1
     error = 0.1
-    interactions = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (3, 5), (4, 5)]
-    pivot_type = 2
-    neigh_num = 2
-    nono_table = "NoNo.table"
     default_units = "real"
+    max_verbosity = 5
+    default_verbosity = 1
 
 class Helper:
     action_proc = 0
     @staticmethod
-    def mpi_print(*args):
+    def mpi_print(*args, verbosity = None):
         if MPI.COMM_WORLD.Get_rank() == Helper.action_proc:
-            print(*args)
-            sys.stdout.flush()
+            if verbosity is None:
+                verbosity = SystemParams.default_verbosity
+            if verbosity <= Data.verbosity:
+                print(*args)
+                sys.stdout.flush()
     """
     @staticmethod
     def mpi_print(*args):

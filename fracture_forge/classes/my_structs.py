@@ -1,35 +1,44 @@
 from lammps import lammps
 from classes.Storage import SystemParams, Helper, Data
-import glob, os, sys, heapq, random
+import glob, os, sys, heapq, random, time
 import numpy as np
 import ctypes as ct
 import regex as re
 from mpi4py import MPI
 import mpmath as mp
+import gc
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
-proc_self_comm = comm
 
 class FracGraph:
-    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, nono_table = "", load_margin = 0, units = "real", minimize = False):
+    def __init__(self, connection_radius, error = 0.1, start_buffer = 0.5, test_mode = False, simulation_temp = 300, units = "real", minimize = False):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        time.sleep(1)
+        comm.Barrier()
+
         self.__units = units
-        self.__load_margin = load_margin
-        self.__nono_table = nono_table
         self.__step_energies = dict()
         self.__dr = connection_radius
         self.__test_mode = test_mode
-        self.__head = Node(is_head = True, test_mode = self.__test_mode, units = self.__units, minimize = minimize)
+        self.__minimize = minimize
+        self.__simulation_temp = simulation_temp
+
+        self.__head = Node(is_head = True, test_mode = self.__test_mode, units = self.__units, minimize = self.__minimize, simulation_temp = self.__simulation_temp)
         self.__head.set_parent(None)
-        self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1, units = self.__units)
+
+        self.__tail = Node(is_tail = True, test_mode = self.__test_mode, node_ctr = 1, units = self.__units, minimize = self.__minimize, simulation_temp = self.__simulation_temp)
+
         self.__node_ctr = 2
-        self.__paths = dict()
-        self.__id_node_map = list()
+
         self.__grid_size = error/np.sqrt(2)
         if self.__dr < self.__grid_size:
             self.__dr = self.__grid_size*1.5
-            Helper.mpi_print("Reset probe radius to allow for fracture graph connectivity")
+            Helper.mpi_print("Reset probe radius to allow for fracture graph connectivity", verbosity = 1)
+
+        self.__head.activate()
         head_lmp = self.__head.get_lmp()
 
         """Surface creation"""
@@ -43,7 +52,7 @@ class FracGraph:
                 max_y = atom[1]
         Data.old_bounds = (min_y, max_y)
 
-        Helper.mpi_print("Old bounds:", Data.old_bounds)
+        Helper.mpi_print("Old bounds:", Data.old_bounds, verbosity = 1)
         #head_lmp.command(f"change_box all y delta {-Data.non_inter_cutoff} {Data.non_inter_cutoff}")
         #head_lmp.command(f"fix surface_relax all npt temp {simulation_temp} {simulation_temp} {100*lmp.eval('dt')} iso 1 1 {1000*lmp.eval('dt')}")
         #head_lmp.command(f"run {Helper.convert_timestep(head_lmp, 0.1)}")
@@ -55,10 +64,9 @@ class FracGraph:
         x_side = box[1][0] - box[0][0]
         start_pos = (x_side/2 + box[0][0], Data.old_bounds[0] - start_buffer)
         self.__head.set_tip(start_pos)
+        self.__path = [(*self.__head.get_pos(), self.__head.get_deltaE())]
         self.__tail.set_tip((x_side/2 + box[0][0], Data.old_bounds[1] + start_buffer))
         self.__node_hash = {self.__head.get_pos() : self.__head, self.__tail.get_pos() : self.__tail}
-        self.__id_node_map.append(self.__head)
-        self.__id_node_map.append(self.__tail)
 
         self.__step_energies[self.__head.get_id()] = [(0, 0)]
 
@@ -69,6 +77,7 @@ class FracGraph:
         atom_box[0][1] = Data.old_bounds[0]
         atom_box[1][1] = Data.old_bounds[1]
         return np.array(atom_box[:2])
+
 
     def get_head(self):
         return self.__head
@@ -93,15 +102,9 @@ class FracGraph:
         grid_coords -= (grid_coords > self.__box[1][:-1])*self.__grid_size
         return tuple(self.__trunc(grid_coords, 3))
 
-    def build_test(self, interactions):
-        if interactions == "default":
-            Data.type_groups = 1
-        else:
-            Data.type_groups = max(sum(interactions, ()))
-
-
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
+    def build_test(self):
         """
+        #
         node1 = self.attach(coords = (5, 5))
         node2 = self.attach(coords = (30, 20))
         node3 = self.attach(coords = (5, 39))
@@ -109,39 +112,65 @@ class FracGraph:
         node1.attach(node2)
         node2.attach(node3)
         node3.attach(self.__tail)
-        """
+        #
+        self.__head.set_tip((self.__box[0][0], Data.old_bounds[0]))
+        self.__tail.set_tip((self.__box[1][0], Data.old_bounds[1]))
         self.__head.attach(self.__tail)
+        #
+        node1 = self.attach(coords = (10, 10))
+        self.__head.attach(node1)
+        node1.attach(self.__tail)
+        #
+        node1 = self.attach(coords = (20, 10))
+        node2 = self.attach(coords = (10, 20))
+        node3 = self.attach(coords = (30, 20))
+        node4 = self.attach(coords = (20, 30))
 
-    def build_arbitrary(self, interactions = "default"):
-        if interactions == "default":
-            Data.type_groups = 1
-        else:
-            Data.type_groups = max(sum(interactions, ()))
+        self.__head.attach(node1)
+        node1.attach(node2)
+        node1.attach(node3)
+        node2.attach(node4)
+        node3.attach(node4)
+        node4.attach(self.__tail)
+        #
+        """
+        node1 = self.attach(coords = (20, 10))
+        node2 = self.attach(coords = (10, 20))
+        node3 = self.attach(coords = (30, 20))
+        node4 = self.attach(coords = (20, 30))
 
-        Helper.mpi_print("Number of type groups:", Data.type_groups)
+        self.__head.attach(node1)
+        node1.attach(node2)
+        node1.attach(node3)
+        node2.attach(node4)
+        node3.attach(node4)
+        node4.attach(self.__tail)
 
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
-        head_lmp = self.__head.get_lmp()
+
+    def build_arbitrary(self, grid_size = None):
+        if grid_size is None:
+            grid_size = self.__dr
+
+        self.__grid_size = grid_size
+
 
         box = self.get_box()
 
-        sides = box[1] - box[0]
+        sides = (box[1] - box[0])[:-1]
 
-        head_divs = int(np.ceil(sides[0]))
-        head_step = sides[0]/head_divs
-        head_nodes = dict()
-        tail_nodes = dict()
-
-        node_grid = self.__dr/np.sqrt(2)
-
-        num_grid_points = np.floor(sides[:-1]/node_grid).astype(int)
-        margins = (sides[:-1] - num_grid_points*node_grid)/2
-        x_span = np.linspace(box[0][0] + margins[0], box[1][0] - margins[0], num_grid_points[0] + 1)
-        y_span = np.linspace(box[0][1] + margins[1], box[1][1] - margins[1], num_grid_points[1] + 1)
+        num_grid_points = np.floor(sides/self.__grid_size).astype(int)
+        right_margins = sides - num_grid_points*self.__grid_size
+        x_span = np.linspace(box[0][0], box[1][0] - right_margins[0], num_grid_points[0] + 1)
+        y_span = np.linspace(Data.old_bounds[0], Data.old_bounds[1] - right_margins[1], num_grid_points[1] + 1)
         min_y = y_span[0]
         max_y = y_span[-1]
-        np.random.shuffle(x_span)
-        np.random.shuffle(y_span)
+        if rank == 0:
+            np.random.shuffle(x_span)
+            np.random.shuffle(y_span)
+
+        comm.Bcast(x_span, root = 0)
+        comm.Bcast(y_span, root = 0)
+
         for y in y_span:
             for x in x_span:
                 node = self.attach(coords = np.array((x, y)))
@@ -149,86 +178,59 @@ class FracGraph:
                     self.__head.attach(node)
                 if y == max_y:
                     self.__tail.attach(node)
-                disc_coords = node.get_pos()
-                node_pos = int(np.floor((disc_coords[0] - box[0][0])/head_step))
+        Helper.mpi_print("Head neighs:", self.__tail.get_neighbors(), verbosity = 4)
+        Helper.mpi_print("Tail neighs:", self.__tail.get_neighbors(), verbosity = 4)
 
-                if node_pos in head_nodes:
-                    if disc_coords[1] < head_nodes[node_pos].get_pos()[1]:
-                        head_nodes[node_pos] = node
-                else:
-                    head_nodes[node_pos] = node
-
-                if node_pos in tail_nodes:
-                    if disc_coords[1] > tail_nodes[node_pos].get_pos()[1]:
-                        tail_nodes[node_pos] = node
-                else:
-                    tail_nodes[node_pos] = node
-
-
-
-
-    def build(self, pivot_atom_type, num_neighs, interactions = "default"):
-        if interactions == "default":
-            Data.type_groups = 1
-        else:
-            Data.type_groups = max(sum(interactions, ()))
-
-        Helper.mpi_print("Number of type groups:", Data.type_groups)
-
-
-        Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
+    def build(self):
         head_lmp = self.__head.get_lmp()
 
-        #Calculate simulation region sides
-        sides = np.array([self.__box[1][0] - self.__box[0][0], self.__box[1][1] - self.__box[0][1], self.__box[1][2] - self.__box[0][2]])
+        sides = np.array(self.__box[1]) - np.array(self.__box[0])
 
-        #head_divs = int(np.ceil(sides[0]/self.__dr))
-        head_divs = int(np.ceil(sides[0]))
+        head_divs = int(np.ceil(sides[0]/self.__dr))
         head_step = sides[0]/head_divs
         head_nodes = dict()
         tail_nodes = dict()
 
         #Gather per-atom information
         positions = np.array(head_lmp.gather_atoms("x", 1, 3), dtype = ct.c_double).reshape((-1, 3))
-        types = np.array(head_lmp.gather_atoms("type", 0, 1), dtype = ct.c_int)
-        ids = np.array(head_lmp.gather_atoms("id", 0, 1), dtype = ct.c_int)
 
-        Helper.mpi_print(f"Head y position: {self.__head.get_pos()[1]}")
-        Helper.mpi_print("Scanning radius:", self.__dr)
+        Helper.mpi_print(f"Head y position: {self.__head.get_pos()[1]}", verbosity = 2)
+        Helper.mpi_print("Scanning radius:", self.__dr, verbosity = 2)
 
         #Cycle through the local ids of atoms with the oxygen type
-        for pid in np.where(types == pivot_atom_type)[0]:
-            #Get the distance vector components
-            diff = positions - positions[pid]
-            #Enforce the periodic boundary condition
-            diff -= np.around(diff/sides)*sides
-            #Calculate the distance vector norm
-            distances = np.linalg.norm(diff, axis = 1)
-            #Mask out the unwanted neighbor candidates (oxygens)
-            distances = np.where(types == pivot_atom_type, float("inf"), distances)
-            #Get local ids of two closest oxygen neighbors
-            neigh_ids = np.where(np.isin(distances, np.partition(distances, num_neighs - 1)[:num_neighs]))[0]
-            #Calculate mid-bond position
-            mid_positions = positions[pid] + diff[neigh_ids]/2
-            #Enforce periodic boundaries
-            mid_positions += (mid_positions < self.__box[0])*sides
-            mid_positions -= (mid_positions > self.__box[1])*sides
-            for mid_pos in mid_positions:
-                node = self.attach(coords = mid_pos[:-1])
-                disc_coords = node.get_pos()
-                node_pos = int(np.floor((disc_coords[0] - self.__box[0][0])/head_step))
+        for atom_pos in positions:
+            diffs = positions - atom_pos
+            diffs -= np.around(diffs/sides)*sides
 
-                if node_pos in head_nodes:
-                    if disc_coords[1] < head_nodes[node_pos].get_pos()[1]:
+            distances = np.sum(diffs**2, axis = 1)
+            sorted_indices = np.argsort(distances)
+            proximity_sort = positions[sorted_indices][1:]
+            distances = np.sqrt((distances[sorted_indices])[1:])
+
+            done = False
+            atom_iter = 0
+            min_dist = distances[atom_iter]
+            while atom_iter < proximity_sort.shape[0] and not done:
+                if distances[atom_iter] - min_dist > self.__dr:
+                    done = True
+                else:
+                    node = self.attach(((proximity_sort[atom_iter] + atom_pos)/2)[:-1])
+                    disc_coords = node.get_pos()
+                    node_pos = int(np.floor((disc_coords[0] - self.__box[0][0])/head_step))
+
+                    if node_pos in head_nodes:
+                        if disc_coords[1] < head_nodes[node_pos].get_pos()[1]:
+                            head_nodes[node_pos] = node
+                    else:
                         head_nodes[node_pos] = node
-                else:
-                    head_nodes[node_pos] = node
 
-                if node_pos in tail_nodes:
-                    if disc_coords[1] > tail_nodes[node_pos].get_pos()[1]:
+                    if node_pos in tail_nodes:
+                        if disc_coords[1] > tail_nodes[node_pos].get_pos()[1]:
+                            tail_nodes[node_pos] = node
+                    else:
                         tail_nodes[node_pos] = node
-                else:
-                    tail_nodes[node_pos] = node
+
+                    atom_iter += 1
 
         head_y_pos = self.__head.get_pos()[1]
         head_neigh_positions = np.array([node.get_pos()[1] - head_y_pos for node in head_nodes.values()])
@@ -254,13 +256,7 @@ class FracGraph:
             if Z < 2:
                 self.__tail.attach(tail_neigh)
 
-    def __node_info_transform(self, node_info):
-        if isinstance(node_info, dict):
-            return (node_info["strongest_link"], node_info["node_id"], node_info["parent_id"], node_info["surface_area"], node_info["theta"], node_info["pe"], node_info["walls"])
-        elif isinstance(node_info, tuple):
-            return {"strongest_link" : node_info[0], "node_id" : node_info[1], "parent_id" : node_info[2], "surface_area" : node_info[3], "theta" : node_info[4], "pe": node_info[5], "walls": node_info[6]}
-        else:
-            raise RuntimeError(f"ERROR: Expected type dict or tuple not {type(node_info)}")
+
 
     @Helper.linear_func
     def recalculate_path(self, path, interactions = "default"):
@@ -271,11 +267,10 @@ class FracGraph:
 
         Data.initial_types = self.__head.get_lmp().extract_global("ntypes")
 
-        Helper.mpi_print("Number of type groups:", Data.type_groups)
         starting_pe = self.__head.activate(box = self.get_box())
         prev_node = self.__head
         for node_pos in path:
-            node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr, units = self.__units)
+            node = Node(tip =  node_pos[:-1], node_ctr = self.__node_ctr, units = self.__units, minimize = self.__minimize, test_mode = self.__test_mode, simulation_temp = self.__simulation_temp)
             self.__node_ctr += 1
             node.activate(parent = prev_node, box = self.get_box())
             prev_node = node
@@ -284,8 +279,8 @@ class FracGraph:
 
 
         self.__tail.get_lmp().command(f"write_data {Data.non_inter_cutoff}_surface.structure")
-        Helper.mpi_print("Surface area created:", 2*self.__tail.get_surface_area())
-        Helper.mpi_print("Energy change:", path_eng)
+        Helper.mpi_print("Surface area created:", 2*self.__tail.get_surface_area(), verbosity = 1)
+        Helper.mpi_print("Energy change:", path_eng, verbosity = 1)
 
         return path_eng/(2*self.__tail.get_surface_area())
 
@@ -335,64 +330,14 @@ class FracGraph:
         else:
             return None
 
-    def __extend_neighbors(self, node):
-        print("Extenging neighbors for", node)
-        disc_coords = node.get_pos()
-        box_x_side = self.__box[1][0] - self.__box[0][0]
-        found_new = False
-        max_y = -float("inf")
-        for neigh in node.get_neighbors():
-            neigh_y = neigh.get_pos()[1]
-            if neigh_y > max_y:
-                max_y = neigh_y
 
-        if max_y <= disc_coords[1]:
-            prev_radius = self.__dr
-        else:
-            prev_radius = max_y - disc_coords[1]
-
-        num_bins = int(np.floor(prev_radius/self.__grid_size))
-        max_extension = 2*self.__dr
-
-
-        print("Previous radius:", prev_radius)
-        while prev_radius < max_extension and not found_new:
-            prev_radius += self.__grid_size
-            num_bins += 1
-            print("Scanning radius:", prev_radius)
-
-            new_neigh_layer = list()
-
-            x = disc_coords[0] - self.__grid_size*num_bins
-            for y in np.linspace(disc_coords[1], disc_coords[1] + self.__grid_size*(num_bins - 1), num_bins):
-                new_neigh_layer.append((x, y))
-            y = disc_coords[1] + self.__grid_size*(num_bins - 1)
-            for x in np.linspace(disc_coords[0] - self.__grid_size*num_bins, disc_coords[0] + self.__grid_size*num_bins, 2*num_bins + 1):
-                new_neigh_layer.append((x, y))
-            x = disc_coords[0] + self.__grid_size*num_bins
-            for y in np.linspace(disc_coords[1], disc_coords[1] + self.__grid_size*(num_bins - 1), num_bins):
-                new_neigh_layer.append((x, y))
-
-            for x, y in new_neigh_layer:
-                neigh_coords = tuple(self.__trunc(np.array([x, y]), 3))
-
-                if neigh_coords != disc_coords and neigh_coords in self.__node_hash and neigh_coords[1] > disc_coords[1] and not self.__node_hash[neigh_coords].is_discarded():
-                    neigh_node =  self.__node_hash[neigh_coords]
-                    Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
-                    node.attach(neigh_node)
-                    found_new = True
-
-
-        return found_new
-
-
-
-    def calculate(self, save_dir = "out_structs", outp_freq = 1):
+    def calculate(self):
         node = self.__head
-        box = self.get_box()
-        node.activate(box = box)
+
+        pathE = 0
 
         while not node.is_tail():
+            Helper.mpi_print("-------", verbosity = 1)
             current_pos = node.get_pos()
             neighbors = node.get_neighbors()
             selected_neighs = list()
@@ -400,13 +345,21 @@ class FracGraph:
             num_accepted = 0
             for neigh in neighbors:
                 if neigh.get_pos()[1] > current_pos[1]:
-                    weight = neigh.activate(box = box, parent = node)
+                    weight = neigh.activate(parent = node)
                     selected_neighs.append((weight, neigh))
                     Z += weight
                     num_accepted += 1
 
+            if not num_accepted:
+                raise RuntimeError("Node without neighbors. Increase spanning radius (Keep in mind that more unrealistically large cuts will be available) or use arbitrary grid.")
+
             cumul_prob = 0
-            rand_selector = random.random()
+            if rank == 0:
+                rand_selector = random.random()
+            else:
+                rand_selector = None
+
+            rand_selector = comm.bcast(rand_selector, root = 0)
             i = 0
             found_next = False
             while i < num_accepted and not found_next:
@@ -414,51 +367,48 @@ class FracGraph:
                 if (rand_selector > cumul_prob) and (rand_selector <= cumul_prob + p):
                     node = selected_neighs[i][1]
                     found_next = True
+                    Helper.mpi_print("Selected Node:", node, verbosity = 1)
                 else:
                     cumul_prob += p
 
                 i += 1
+            node_deltaE = node.get_deltaE()
+            pathE += node_deltaE
+            self.__path.append((*node.get_pos(), node_deltaE))
 
 
-        if rank == 0:
-            E = node.get_pe() - self.__head.get_pe()
-            G = 0.69*(E)/node.get_surface_area()
-            Helper.print("Energy diff:", E)
-            Helper.print("G:", G)
+        crack_surface_area = (Data.units_data[self.__units]["length"]**2)*node.get_surface_area()
+        experimental_surface_area = (Data.units_data[self.__units]["length"]**2)*(Data.old_bounds[1] - Data.old_bounds[0])*(self.__box[1][2] - self.__box[0][2]) 
+
+        Helper.mpi_print("Surface Area (m^2)", crack_surface_area, verbosity = 1)
+        Helper.mpi_print("Experimental Area (m^2)", experimental_surface_area, verbosity = 2)
+        
+        self.__head.wall_list = node.wall_list.copy()
+        energy_difference = Data.units_data[self.__units]["energy"]*(self.__head.reset_lowest(reset_head = True) - self.__head.get_pe())
+
+        energy_release_rate = energy_difference/crack_surface_area
+        experimental_energy_release_rate = energy_difference/experimental_surface_area
+        step_eng_rel = Data.units_data[self.__units]["energy"]*pathE/crack_surface_area
+        exp_step_G = Data.units_data[self.__units]["energy"]*pathE/experimental_surface_area
+
+        Helper.mpi_print("Energy diff (J):", energy_difference, verbosity = 1)
+        Helper.mpi_print("Step energy diff (J):", pathE, verbosity = 1)
+        Helper.mpi_print("G (J/m^2):", energy_release_rate, verbosity = 1)
+        Helper.mpi_print("Experimental G (J/m^2):", experimental_energy_release_rate, verbosity = 2)
+        Helper.mpi_print("Step G (J/m^2):", step_eng_rel, verbosity = 2)
+        Helper.mpi_print("EStep G (J/m^2):", exp_step_G, verbosity = 2)
+
+        if os.path.isdir(".states"):
+            Helper.action(os.system, "rm -r .states")
                     
 
 
 
-    @Helper.linear_func
-    def __rec_path_search(self, node_id):
-        if self.__id_node_map[node_id].is_head():
-            return [[(*self.__id_node_map[node_id].get_pos(), self.__step_energies[node_id][0])]]
-
-        local_paths = list()
-        for i, parent in enumerate(self.__paths[node_id]):
-            for par_path in self.__rec_path_search(parent):
-                local_paths.append([(*self.__id_node_map[node_id].get_pos(), self.__step_energies[node_id][i])] + par_path)
-        
-        return local_paths
-
 
     @Helper.linear_func
-    def get_paths(self):
-        out = list()
-        desired_rec_depth = len(self.__paths)*2
-        if desired_rec_depth > sys.getrecursionlimit():
-            sys.setrecursionlimit(desired_rec_depth)
-        for node_id in self.__paths.keys():
-            if node_id not in self.__paths.values():
-                leaf_paths = self.__rec_path_search(node_id)
-                for path in leaf_paths:
-                    if self.__id_node_map[node_id].is_tail():
-                        path[0] = (path[1][0], path[0][1], path[0][2])
-                    path[-1] = (path[-2][0], path[-1][1], path[-1][2])
-                out += leaf_paths
-
-        sorted_paths = sorted(out, key = lambda node_lst : len(node_lst), reverse = True)
-        return sorted_paths
+    def get_path(self):
+        self.__path[0] = (self.__path[1][0], self.__path[0][1], self.__path[0][2])
+        return self.__path[::-1]
 
 
     def attach(self, coords):
@@ -467,10 +417,9 @@ class FracGraph:
         if disc_coords in self.__node_hash:
             new_node = self.__node_hash[disc_coords]
         else:
-            new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr, units = self.__units)
-            self.__id_node_map.append(new_node)
+            new_node = Node(tip = disc_coords, node_ctr = self.__node_ctr, units = self.__units, minimize = self.__minimize, test_mode = self.__test_mode, simulation_temp = self.__simulation_temp)
             self.__node_hash[disc_coords] = new_node
-            Helper.mpi_print("Created a new node", self.__node_ctr, "at pos:", disc_coords)
+            Helper.mpi_print("Created a new node", self.__node_ctr, "at pos:", disc_coords, verbosity = 2)
             self.__node_ctr += 1
 
 
@@ -482,7 +431,7 @@ class FracGraph:
 
                     if neigh_coords != disc_coords and neigh_coords in self.__node_hash:
                         neigh_node =  self.__node_hash[neigh_coords]
-                        Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords)
+                        Helper.mpi_print("Adding neighbor:", neigh_node.get_id(), "at pos:", neigh_coords, verbosity = 4)
                         new_node.attach(neigh_node)
 
 
@@ -493,7 +442,7 @@ class FracGraph:
         
 
 class Node:
-    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False, timestep = 1, minimize = False):
+    def __init__(self, is_head = False, tip = None, units = "real", test_mode = False, node_ctr = 0, is_tail = False, timestep = 1, minimize = False, simulation_temp = 300):
         self.__id = node_ctr
         self.__active = False
         self.__is_head = is_head
@@ -507,35 +456,34 @@ class Node:
         self.__discarded = False
         self.wall_list = list()
         self.current_wall_count = 0
+        self.__temp = simulation_temp
+        self.__units = units
+        self.__test_mode = test_mode
+        self.__minimize = minimize
+        self.__E = 0
 
         if self.__is_head:
-            self.__units = units
-            self.current_wall_count = 0
-            if test_mode:
+            self.__theta = np.pi/2
+            if os.path.isdir(".states"):
+                Helper.action(os.system, "rm -r .states")
+            Helper.action(os.mkdir, ".states")
+            if self.__test_mode:
                 if os.path.isdir("logs"):
                     Helper.action(os.system, "rm -r logs")
                 Helper.action(os.mkdir, "logs")
-                comm.Barrier()
-                self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{rank}.lammps"], comm = proc_self_comm)
-            else:
-                self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"], comm = proc_self_comm)
-            self.__system_parameters_initialization(units = units)
-            self.__lmp.command(f"timestep {timestep}")
-            if Data.structure_file:
-                filename = Data.structure_file
-            else:
-                filename = glob.glob("glass_*.structure")[-1]
-            self.structure_file = os.path.abspath(filename)
-            if Data.potfile:
-                self.potfile = Data.potfile
-            else:
-                name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
-                self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
-            self.__lmp.command(f"read_data {filename}")
-            self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}/../")
-            self.__theta = np.pi/2
+
+        if Data.structure_file:
+            filename = Data.structure_file
         else:
-            self.atom_positions = None
+            filename = glob.glob("glass_*.structure")[-1]
+        self.structure_file = os.path.abspath(filename)
+        if Data.potfile:
+            self.potfile = Data.potfile
+        else:
+            name_handle = re.search(r"(?<=glass_).+(?=\.structure)", filename).group()
+            self.potfile = os.path.abspath(f"pot_{name_handle}.FF")
+
+
 
             
 
@@ -564,42 +512,12 @@ class Node:
         node.__neighbors.add(self)
         return self
 
-    def set_parent(self, node):
-        if node:
-            node_pos = node.get_pos()
-            if not (self.__tip[0] - node_pos[0]):
-                if self.__tip[1] > node_pos[1]:
-                    self.__theta = np.pi/2
-                else:
-                    self.__theta = -np.pi/2
-            else:
-                x = self.__tip[0] - node_pos[0]
-                if x > 0:
-                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x)
-                else:
-                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x) + np.pi
-
-
-            self.__lmp = node.get_lmp()
-            self.__prev_theta = node.get_theta()
-            self.wall_list = node.wall_list.copy()
-            self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*node.atom_positions))
-            self.minimize = node.minimize
-
-
-            if self.is_tail():
-                self.__theta = np.pi/2
-                par_pos = node.get_pos()
-                self.set_tip((par_pos[0], self.get_pos()[1]))
-
-            if node.is_head():
-                self.__theta = np.pi/2
-                node.set_tip((self.__tip[0], node.get_pos()[1]))
-
-            #Helper.print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
-        self.__parent = node
 
     #Getters
+
+    def get_deltaE(self):
+        return self.__deltaE
+
     def get_atom_positions(self):
         if self.atom_positions is not None:
             return self.atom_positions
@@ -654,6 +572,9 @@ class Node:
     def get_cut_length(self):
         return self.__cut_length
 
+    def get_energy_change(self):
+        return self.__E
+
     #State functions
     def is_discarded(self):
         return self.__discarded
@@ -678,43 +599,118 @@ class Node:
         return self.__id < node.__id
 
     #Main behavior
-    def __system_parameters_initialization(self, units):
-        self.__lmp.command(f"units {units}")
-        SystemParams.units = units
+    def __post_structure(self):
+        self.__lmp.command(f"include {self.potfile}")
+        self.__lmp.command(f"velocity all create {self.__temp} {random.randint(0, 1000000)}")
+        #self.__lmp.command("min_style sd")
+        #self.__lmp.commands_string("""# Define variables for simulation box limits
+        ## Define the radius of the cylinders
+        #variable radius equal 10.0
+
+        ## Create the first cylindrical region at (xlo, ylo)
+        #region cyl1 cylinder z $(xlo) $(ylo) $(v_radius) $(zlo) $(zhi)
+
+        ## Create the second cylindrical region at (xhi, ylo)
+        #region cyl2 cylinder z $(xhi) $(ylo) $(v_radius) $(zlo) $(zhi)
+
+        #group cyl1 region cyl1
+        #group cyl2 region cyl2
+
+        #fix pull all addforce 0.0 0.0 10
+        #""")
+        if self.__test_mode:
+            self.__lmp.command("thermo_style custom step temp etotal pe vol density press")
+            self.__lmp.command("thermo 1")
+
+    def __pre_structure(self):
+        self.__lmp.command(f"units {self.__units}")
+        SystemParams.units = self.__units
         self.__lmp.command("atom_style charge")
         self.__lmp.command("boundary p p p")
         self.__lmp.command("comm_modify mode single vel yes")
-        self.__lmp.command("neighbor 0.0 bin")
+        self.__lmp.command("neighbor 2.0 bin")
+        #self.__lmp.command("neigh_modify every 1 delay 0 check no")
         self.__lmp.command("neigh_modify every 1 delay 0")
+        self.__lmp.command("atom_modify map yes")
+        self.__lmp.command(f"variable pot_dir string {'/'.join(self.potfile.split(r'/')[:-1])}/../")
+        #self.__lmp.command("min_modify dmax 0.01")
 
-    def reset_lowest(self, surface_area, theta, head, pe, walls):
-        self.__lmp = head.__lmp
-        self.__pe = pe
-        self.current_wall_count = 0
-        if not self.is_head():
-            self.__surface_area = surface_area
-            self.__theta = theta
-            self.atom_positions = np.copy(head.atom_positions)
-            self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.atom_positions))
-            self.place_walls(walls)
+    def set_parent(self, node):
+        if node:
+            node_pos = node.get_pos()
+            if not (self.__tip[0] - node_pos[0]):
+                if self.__tip[1] > node_pos[1]:
+                    self.__theta = np.pi/2
+                else:
+                    self.__theta = -np.pi/2
+            else:
+                x = self.__tip[0] - node_pos[0]
+                if x > 0:
+                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x)
+                else:
+                    self.__theta = np.arctan((self.__tip[1] - node_pos[1])/x) + np.pi
 
-    def take_walls_down(self):
-        for i in range(self.current_wall_count):
-            self.__lmp.command(f"region slab_{i} delete")
-            self.__lmp.command(f"unfix wall_{i}")
 
-    def activate(self, box, parent = None):
+            self.__prev_theta = node.get_theta()
+            self.wall_list = node.wall_list.copy()
+            self.__start_lammps()
+            self.__lmp.command(f"read_restart .states/system.{node.__id}.state")
+            self.__post_structure()
+            for i, wall in enumerate(self.wall_list):
+                self.add_wall(wall, i + 1)
+
+            self.__lmp.command("run 0")
+            self.__parent_pe  = self.__lmp.get_thermo('pe')
+            Helper.mpi_print(f"AFTER RESET ENG({node.__id}): {self.__parent_pe}")
+
+
+            if self.is_tail():
+                self.__theta = np.pi/2
+                par_pos = node.get_pos()
+                self.set_tip((par_pos[0], self.get_pos()[1]))
+
+            if node.is_head():
+                self.__theta = np.pi/2
+                node.set_tip((self.__tip[0], node.get_pos()[1]))
+
+            #Helper.print(f"Node {self.__id} angle: {self.__theta*180/np.pi} with node {node.get_id()} as parent")
+        self.__parent = node
+
+    def reset_lowest(self, reset_head = False):
+        if not self.is_head() or reset_head:
+            Helper.mpi_print("Resetting lowest:", self.__id)
+            self.__start_lammps()
+            self.__lmp.command(f"read_restart .states/system.{self.__id}.state")
+            self.__post_structure()
+            for i, wall in enumerate(self.wall_list):
+                self.add_wall(wall, i + 1)
+
+            self.__lmp.command("run 0")
+            after_reset_pe = self.__lmp.get_thermo('pe')
+            Helper.mpi_print(f"AFTER RESET ENG({self.__id}): {after_reset_pe}")
+            return after_reset_pe
+
+
+
+    def __start_lammps(self):
+        Helper.mpi_print("Starting lammps for node", self.__id)
+        if self.__test_mode:
+            self.__lmp = lammps(cmdargs = ["-log", f"logs/log.{self.__id}.lammps"], comm = comm)
+        else:
+            self.__lmp = lammps(cmdargs = ["-log", "none", "-screen", "none"], comm = comm)
+
+        self.__pre_structure()
+
+
+
+    def activate(self, parent = None):
         if self.__is_head:
             if not self.__active:
-                self.__lmp.command("clear")
-                self.__system_parameters_initialization(units = self.__units)
-                self.__lmp.command(f"atom_modify map yes")
+                self.__start_lammps()
                 self.__lmp.command(f"read_data {self.structure_file}")
-                self.__lmp.command(f"include {self.potfile}")
-                Helper.mpi_print("Head node activated")
+                self.__post_structure()
         else:
             self.set_parent(parent)
-
             par_pos = self.__parent.get_pos()
             y_dist = self.__tip[1] - par_pos[1]
             x_dist = self.__tip[0] - par_pos[0]
@@ -725,42 +721,49 @@ class Node:
                 y_dist = Data.old_bounds[1] - par_pos[1]
                 x__dist = 0
 
+            box = self.__lmp.extract_box()
             z_dim = box[1][2] - box[0][2]
             self.__cut_length = np.sqrt(x_dist**2 + y_dist**2)
             self.__surface_area = self.__parent.get_surface_area() + self.__cut_length*z_dim
 
             self.wall_list.append({"center": f"{self.__tip[0] - x_dist/2} {self.__tip[1] - y_dist/2} {(box[1][2] + box[0][2])/2}", "side1": f"{x_dist} {y_dist} 0", "side2": f"0 0 {z_dim}"})
             self.current_wall_count = self.__parent.current_wall_count + 1
-            Helper.mpi_print(f"Node {self.__id} wall {self.current_wall_count} {self.wall_list[-1]}")
             self.add_wall(wall = self.wall_list[-1])
+            #self.__lmp.command("compute paf all property/atom fx fy fz")
+            #self.__lmp.command(f"dump atm_dump all custom 1 pos.{self.__id}.dump id type x y z c_paf[1] c_paf[2] c_paf[3]")
 
-
-
-            try:
-                grandparent = self.__parent.get_parent()
-                del grandparent
-            except:
-                pass
 
 
         self.__lmp.command("run 0")
-        my_prerelax = self.__lmp.get_thermo("pe") 
-        if self.minimize:
+        self.prerelax_pe = self.__lmp.get_thermo("pe") 
+        Helper.mpi_print(f"BEFORE MIN ENG({self.__id}): {self.prerelax_pe}")
+        if self.__minimize and not self.__is_tail:
             self.__lmp.command("minimize 1.0e-8 1.0e-8 100000 10000000")
+
         self.__active = True
         self.__pe = self.__lmp.get_thermo("pe")
-        self.atom_positions = np.array(self.__lmp.gather_atoms("x", 1, 3), dtype = ct.c_double)
+        Helper.mpi_print(f"AFTER MIN ENG({self.__id}): {self.__pe}")
+
+        if not self.__is_tail:
+            self.__lmp.command(f"write_restart .states/system.{self.__id}.state")
+            if not self.__is_head:
+                self.__lmp.close()
+                del self.__lmp
+                gc.collect()
+
 
         if self.__is_head:
-            return 1
+            self.__deltaE = 0
+            Helper.mpi_print(f"Node {self.__id}, activated (HEAD)")
+            Helper.mpi_print("Selected Node:", self)
         else:
-            E = my_prerelax - self.__parent.get_pe()
+            #self.__lmp.close()
+            self.__deltaE = self.prerelax_pe - self.__parent_pe
+            self.__E = self.__parent.__E + self.__deltaE
 
-            self.__lmp.command(f"region slab_{self.current_wall_count} delete")
-            self.__lmp.command(f"unfix wall_{self.current_wall_count}")
-            #self.__lmp.scatter_atoms("x", ct.c_int(1), ct.c_int(3), (self.__lmp.get_natoms()*3*ct.c_double)(*self.__parent.atom_positions))
+            Helper.mpi_print(f"Node {self.__id}, activated at x = {round(self.__tip[0], 3)}, y = {round(self. __tip[1], 3)}, Parent: {self.__parent.__id}, dE: {self.__deltaE}")
 
-        return mp.exp(-E/(Data.boltzman*SystemParams.simulation_temp))
+        return mp.exp(-self.__deltaE/(Data.boltzman*self.__temp))
 
 
     def place_walls(self, wall_list):
@@ -772,5 +775,12 @@ class Node:
         if wall_num is None:
             wall_num = self.current_wall_count
 
+        if wall_num != 1:
+            append = "append wall_1"
+        else:
+            append = ""
+
+        Helper.mpi_print(f"Adding wall {wall_num}", verbosity = 5)
+
         self.__lmp.command(f"region slab_{wall_num} slab center {wall['center']} side1 {wall['side1']} side2 {wall['side2']}")
-        self.__lmp.command(f"fix wall_{wall_num} all wall/ghost/region slab_{wall_num} -1")
+        self.__lmp.command(f"fix wall_{wall_num} all wall/ghost/region slab_{wall_num} {append}")
